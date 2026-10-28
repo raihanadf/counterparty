@@ -1,0 +1,4 @@
+.build
+.swiftpm
+Counterparty.app
+.DS_Store
