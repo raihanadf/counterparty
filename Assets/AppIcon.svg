@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024" fill="none">
+  <title>Counterparty</title>
+  <desc>Sell volume reaches in from the left and buy volume from the right; both stop at the same price column.</desc>
+  <defs>
+    <linearGradient id="surface" x1="512" y1="100" x2="512" y2="924" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#1C2430"/>
+      <stop offset="1" stop-color="#0E1116"/>
+    </linearGradient>
+    <linearGradient id="edge" x1="512" y1="100" x2="512" y2="924" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#526071" stop-opacity="0.55"/>
+      <stop offset="1" stop-color="#526071" stop-opacity="0.12"/>
+    </linearGradient>
+    <filter id="shadow" x="36" y="48" width="952" height="964" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+      <feGaussianBlur stdDeviation="18"/>
+    </filter>
+  </defs>
+  <!-- The 824 px body leaves Apple's 100 px transparent icon margin. -->
+  <rect x="100" y="120" width="824" height="824" rx="185" fill="#000000" fill-opacity="0.28" filter="url(#shadow)"/>
+  <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#surface)"/>
+  <rect x="101" y="101" width="822" height="822" rx="184" stroke="url(#edge)" stroke-width="2"/>
+  <!-- Sell pressure peaks above the buy peak: every executed level has a party on each side of the price. -->
+  <g fill="#EB1E2F">
+    <path d="M318 250H484V354H318A14 14 0 0 1 304 340V264A14 14 0 0 1 318 250Z"/>
+    <path d="M230 390H484V494H230A14 14 0 0 1 216 480V404A14 14 0 0 1 230 390Z"/>
+    <path d="M358 530H484V634H358A14 14 0 0 1 344 620V544A14 14 0 0 1 358 530Z"/>
+    <path d="M286 670H484V774H286A14 14 0 0 1 272 760V684A14 14 0 0 1 286 670Z"/>
+  </g>
+  <g fill="#3BCA6D">
+    <path d="M540 250H658A14 14 0 0 1 672 264V340A14 14 0 0 1 658 354H540Z"/>
+    <path d="M540 390H730A14 14 0 0 1 744 404V480A14 14 0 0 1 730 494H540Z"/>
+    <path d="M540 530H794A14 14 0 0 1 808 544V620A14 14 0 0 1 794 634H540Z"/>
+    <path d="M540 670H706A14 14 0 0 1 720 684V760A14 14 0 0 1 706 774H540Z"/>
+  </g>
+  <rect x="496" y="210" width="32" height="604" rx="16" fill="#E8EDF3"/>
+</svg>

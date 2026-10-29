@@ -44,19 +44,69 @@ public struct SocketState: Sendable {
 
 public protocol Exchange: Sendable {
     var id: String { get }
-    // aggr fetches these through its cors proxy, which only accepts these exact urls
-    var productURLs: [String] { get }
     var socketURL: String { get }
     var ping: (message: String, every: Duration)? { get }
-    func catalog(from responses: [Data]) throws -> Catalog
+    // the pairs this app takes for a coin, "{}" is the coin. a coin gets every one the exchange lists
+    var templates: [String] { get }
+    // binance and bitstamp name pairs in lowercase
+    var lowercase: Bool { get }
+    func loadCatalog() async throws -> Catalog
     // index is the position of the pair on its socket, some channels are per socket and not per pair
     func subscriptions(pair: String, index: Int) -> [String]
     // messages that are not trades (acks, heartbeats) give nothing
     func parse(_ data: Data, catalog: Catalog, state: inout SocketState) -> [Trade]
 }
 
+// exchanges whose product lists come through aggr's cors proxy, like aggr does it
+protocol ProxiedExchange: Exchange {
+    // the proxy only accepts these exact urls
+    var productURLs: [String] { get }
+    func catalog(from responses: [Data]) throws -> Catalog
+}
+
+private let proxy = "https://cors.aggr.trade/"
+
+extension ProxiedExchange {
+    public func loadCatalog() async throws -> Catalog {
+        // all of an exchange's lists at once, kept in productURLs order since catalog(from:) reads them by position
+        let responses = try await withThrowingTaskGroup(of: (Int, Data).self) { group in
+            for (index, url) in productURLs.enumerated() {
+                group.addTask {
+                    let (data, response) = try await URLSession.shared.data(from: URL(string: proxy + url)!)
+                    if let http = response as? HTTPURLResponse, http.statusCode != 200 {
+                        throw ProductError(errorDescription: "\(url) answered \(http.statusCode)")
+                    }
+                    return (index, data)
+                }
+            }
+            var byIndex: [Int: Data] = [:]
+            for try await (index, data) in group { byIndex[index] = data }
+            return productURLs.indices.map { byIndex[$0]! }
+        }
+        return try catalog(from: responses)
+    }
+}
+
 extension Exchange {
     public var ping: (message: String, every: Duration)? { nil }
+    public var lowercase: Bool { false }
+
+    // the coin a pair belongs to, through the templates
+    func coin(of pair: String) -> String? {
+        for template in templates {
+            let suffix = String(template.dropFirst(2))
+            let cased = lowercase ? suffix.lowercased() : suffix
+            guard pair.hasSuffix(cased), pair.count > cased.count else { continue }
+            let coin = pair.dropLast(cased.count)
+            // "AVAX:USD" against "{}USD" leaves "AVAX:", that's the other template's pair
+            if coin.allSatisfy({ $0.isLetter || $0.isNumber }) { return coin.uppercased() }
+        }
+        return nil
+    }
+
+    func pairs(for coin: String) -> [String] {
+        templates.map { $0.replacingOccurrences(of: "{}", with: lowercase ? coin.lowercased() : coin) }
+    }
 }
 
 struct ProductError: LocalizedError {
@@ -77,7 +127,6 @@ private struct BinanceInfo: Decodable {
         let status: String?
         let contractStatus: String?
         let contractSize: Double?
-        let permissions: [String]?
     }
     let symbols: [Symbol]
 }
@@ -99,36 +148,12 @@ private struct BinanceEvent: Decodable {
     let o: Order?
 }
 
-struct Binance: Exchange {
-    let id = "BINANCE"
-    let productURLs = ["https://data-api.binance.vision/api/v3/exchangeInfo"]
-    let socketURL = "wss://data-stream.binance.vision:9443/ws"
-
-    func catalog(from responses: [Data]) throws -> Catalog {
-        var catalog = Catalog()
-        for product in try require(BinanceInfo.self, responses[0], id).symbols
-        where product.status == "TRADING" && !(product.permissions ?? []).contains("LEVERAGED") {
-            catalog.pairs.insert(product.symbol.lowercased())
-        }
-        return catalog
-    }
-
-    func subscriptions(pair: String, index: Int) -> [String] {
-        [#"{"method":"SUBSCRIBE","params":["\#(pair)@aggTrade"],"id":\#(index + 1)}"#]
-    }
-
-    func parse(_ data: Data, catalog: Catalog, state: inout SocketState) -> [Trade] {
-        guard let event = decode(BinanceEvent.self, data), event.e == "aggTrade",
-              let s = event.s, let time = event.T, let price = event.p, let size = event.q, let maker = event.m
-        else { return [] }
-        return [Trade(market: "\(id):\(s.lowercased())", timestamp: time, price: price.value, size: size.value, side: maker ? .sell : .buy, liquidation: false)]
-    }
-}
-
-struct BinanceFutures: Exchange {
+struct BinanceFutures: ProxiedExchange {
     let id = "BINANCE_FUTURES"
     let productURLs = ["https://fapi.binance.com/fapi/v1/exchangeInfo", "https://dapi.binance.com/dapi/v1/exchangeInfo"]
     let socketURL = "wss://fstream.binance.com/market/ws"
+    let templates = ["{}usdt", "{}usd_perp"]
+    let lowercase = true
 
     func catalog(from responses: [Data]) throws -> Catalog {
         var catalog = Catalog()
@@ -175,10 +200,12 @@ private struct BitfinexSubscribed: Decodable {
     let pair: String?
 }
 
-struct Bitfinex: Exchange {
+struct Bitfinex: ProxiedExchange {
     let id = "BITFINEX"
     let productURLs = ["https://api.bitfinex.com/v1/symbols"]
     let socketURL = "wss://api-pub.bitfinex.com/ws/2/"
+    // perps only, which bitfinex names like BTCF0:USTF0
+    let templates = ["{}F0:USTF0"]
 
     func catalog(from responses: [Data]) throws -> Catalog {
         Catalog(pairs: Set(try require([String].self, responses[0], id).map { $0.uppercased() }))
@@ -227,71 +254,11 @@ struct Bitfinex: Exchange {
     }
 }
 
-private struct BitmexInstrument: Decodable {
-    let symbol: String
-    let isInverse: Bool
-    let isQuanto: Bool
-    let underlyingToPositionMultiplier: Double?
-}
-
-private struct BitmexMessage: Decodable {
-    struct Row: Decodable {
-        let symbol: String
-        let side: String?
-        let price: Double?
-        let timestamp: String?
-        let homeNotional: Double?
-        let leavesQty: Double?
-    }
-    let table: String
-    let action: String
-    let data: [Row]
-}
-
-struct Bitmex: Exchange {
-    let id = "BITMEX"
-    let productURLs = ["https://www.bitmex.com/api/v1/instrument/active"]
-    let socketURL = "wss://www.bitmex.com/realtime"
-
-    func catalog(from responses: [Data]) throws -> Catalog {
-        // bitmex shut down, the endpoint now answers with an empty body
-        guard !responses[0].isEmpty else { throw ProductError(errorDescription: "www.bitmex.com returned an empty product list") }
-        var catalog = Catalog()
-        // quanto contracts need the live xbt price to size liquidations, none of aggr's btc markets are quanto
-        for product in try require([BitmexInstrument].self, responses[0], id) where !product.isQuanto {
-            catalog.pairs.insert(product.symbol)
-            if product.isInverse {
-                catalog.inverse.insert(product.symbol)
-            } else if let multiplier = product.underlyingToPositionMultiplier {
-                catalog.multiplier[product.symbol] = 1 / multiplier
-            }
-        }
-        return catalog
-    }
-
-    func subscriptions(pair: String, index: Int) -> [String] {
-        [#"{"op":"subscribe","args":["trade:\#(pair)","liquidation:\#(pair)"]}"#]
-    }
-
-    func parse(_ data: Data, catalog: Catalog, state: inout SocketState) -> [Trade] {
-        guard let message = decode(BitmexMessage.self, data), message.action == "insert",
-              message.table == "trade" || message.table == "liquidation"
-        else { return [] }
-        let liquidation = message.table == "liquidation"
-        return message.data.compactMap { row in
-            guard let price = row.price else { return nil }
-            let size = liquidation ? row.leavesQty.map { catalog.toBase(row.symbol, size: $0, price: price) } : row.homeNotional
-            let time = liquidation ? Date().timeIntervalSince1970 * 1000 : row.timestamp.flatMap { milliseconds(iso: $0) }
-            guard let size, let time else { return nil }
-            return Trade(market: "\(id):\(row.symbol)", timestamp: time, price: price, size: size, side: row.side == "Buy" ? .buy : .sell, liquidation: liquidation)
-        }
-    }
-}
-
 private struct BybitInstruments: Decodable {
     struct Result: Decodable {
         struct Item: Decodable { let symbol: String }
         let list: [Item]
+        let nextPageCursor: String?
     }
     let result: Result
 }
@@ -310,24 +277,43 @@ private struct BybitMessage: Decodable {
 
 struct Bybit: Exchange {
     let id = "BYBIT"
-    let productURLs = [
-        "https://api.bybit.com/v5/market/instruments-info?category=linear",
-        "https://api.bybit.com/v5/market/instruments-info?category=inverse"
-    ]
     let socketURL = "wss://stream.bybit.com/v5/public/inverse"
+    // usdt perps and inverse perps
+    let templates = ["{}USDT", "{}USD"]
     var ping: (message: String, every: Duration)? { (#"{"op":"ping"}"#, .seconds(20)) }
 
-    func catalog(from responses: [Data]) throws -> Catalog {
-        var catalog = Catalog()
-        for (index, response) in responses.enumerated() {
-            for item in try require(BybitInstruments.self, response, id).result.list {
-                catalog.pairs.insert(item.symbol)
-                if index == 0 {
-                    catalog.sockets[item.symbol] = "wss://stream.bybit.com/v5/public/linear"
-                } else {
-                    catalog.inverse.insert(item.symbol)
+    // aggr's proxy only carries the first page of 500 linear pairs, so bybit is read directly, page by page
+    func loadCatalog() async throws -> Catalog {
+        // both categories at once, each one page by page
+        let lists = try await withThrowingTaskGroup(of: (String, [String]).self) { group in
+            for category in ["linear", "inverse"] {
+                group.addTask {
+                    var symbols: [String] = []
+                    var cursor = ""
+                    repeat {
+                        var url = URLComponents(string: "https://api.bybit.com/v5/market/instruments-info")!
+                        url.queryItems = [URLQueryItem(name: "category", value: category), URLQueryItem(name: "limit", value: "1000")]
+                        if !cursor.isEmpty { url.queryItems?.append(URLQueryItem(name: "cursor", value: cursor)) }
+                        let page = try require(BybitInstruments.self, try await httpGet(url.url!), id).result
+                        symbols += page.list.map(\.symbol)
+                        cursor = page.nextPageCursor ?? ""
+                    } while !cursor.isEmpty
+                    return (category, symbols)
                 }
             }
+            var lists: [String: [String]] = [:]
+            for try await (category, symbols) in group { lists[category] = symbols }
+            return lists
+        }
+
+        var catalog = Catalog()
+        for symbol in lists["linear"]! {
+            catalog.pairs.insert(symbol)
+            catalog.sockets[symbol] = "wss://stream.bybit.com/v5/public/linear"
+        }
+        for symbol in lists["inverse"]! {
+            catalog.pairs.insert(symbol)
+            catalog.inverse.insert(symbol)
         }
         return catalog
     }
@@ -343,65 +329,6 @@ struct Bybit: Exchange {
             // a liquidation reported as "Buy" is a long position being closed, aggr flips it
             let buy = liquidation ? row.S != "Buy" : row.S == "Buy"
             return Trade(market: "\(id):\(row.s)", timestamp: row.T, price: row.p.value, size: catalog.toBase(row.s, size: row.v.value, price: row.p.value), side: buy ? .buy : .sell, liquidation: liquidation)
-        }
-    }
-}
-
-private struct CoinbaseProducts: Decodable {
-    struct Product: Decodable {
-        let product_id: String
-        let status: String?
-        let alias: String?
-    }
-    let products: [Product]
-}
-
-private struct CoinbaseMessage: Decodable {
-    struct Event: Decodable {
-        struct Row: Decodable {
-            let product_id: String
-            let price: Num
-            let size: Num
-            let time: String
-            let side: String
-        }
-        let type: String
-        let trades: [Row]?
-    }
-    let channel: String
-    let events: [Event]
-}
-
-struct Coinbase: Exchange {
-    let id = "COINBASE"
-    let productURLs = [
-        "https://api.coinbase.com/api/v3/brokerage/market/products?product_type=SPOT",
-        "https://api.coinbase.com/api/v3/brokerage/market/products?product_type=FUTURE&contract_expiry_type=PERPETUAL"
-    ]
-    let socketURL = "wss://advanced-trade-ws.coinbase.com"
-
-    func catalog(from responses: [Data]) throws -> Catalog {
-        var catalog = Catalog()
-        for product in try require(CoinbaseProducts.self, responses[0], id).products
-        where product.status == "online" && (product.alias ?? "").isEmpty {
-            catalog.pairs.insert(product.product_id)
-        }
-        for product in try require(CoinbaseProducts.self, responses[1], id).products {
-            catalog.pairs.insert(product.product_id)
-        }
-        return catalog
-    }
-
-    func subscriptions(pair: String, index: Int) -> [String] {
-        [#"{"type":"subscribe","channel":"market_trades","product_ids":["\#(pair)"]}"#]
-    }
-
-    func parse(_ data: Data, catalog: Catalog, state: inout SocketState) -> [Trade] {
-        guard let message = decode(CoinbaseMessage.self, data), message.channel == "market_trades" else { return [] }
-        // snapshots replay old trades, only updates are live. coinbase reports the maker side
-        return message.events.filter { $0.type == "update" }.flatMap { $0.trades ?? [] }.compactMap { row in
-            guard let time = milliseconds(iso: row.time) else { return nil }
-            return Trade(market: "\(id):\(row.product_id)", timestamp: time, price: row.price.value, size: row.size.value, side: row.side == "BUY" ? .sell : .buy, liquidation: false)
         }
     }
 }
@@ -430,15 +357,21 @@ private struct DeribitMessage: Decodable {
     let params: Params
 }
 
-struct Deribit: Exchange {
+struct Deribit: ProxiedExchange {
     let id = "DERIBIT"
-    let productURLs = ["https://www.deribit.com/api/v2/public/get_instruments?currency=BTC&kind=future"]
+    let productURLs = [
+        "https://www.deribit.com/api/v2/public/get_instruments?currency=BTC&kind=future",
+        "https://www.deribit.com/api/v2/public/get_instruments?currency=ETH&kind=future",
+        "https://www.deribit.com/api/v2/public/get_instruments?currency=USDC&kind=future"
+    ]
+    // btc and eth have inverse perps, everything else is a usdc perp
+    let templates = ["{}-PERPETUAL", "{}_USDC-PERPETUAL"]
     let socketURL = "wss://www.deribit.com/ws/api/v2"
     var ping: (message: String, every: Duration)? { (#"{"method":"public/ping"}"#, .seconds(45)) }
 
     func catalog(from responses: [Data]) throws -> Catalog {
         var catalog = Catalog()
-        for instrument in try require(DeribitInstruments.self, responses[0], id).result where instrument.is_active {
+        for instrument in try responses.flatMap({ try require(DeribitInstruments.self, $0, id).result }) where instrument.is_active {
             catalog.pairs.insert(instrument.instrument_name)
             if instrument.future_type == "reversed" { catalog.inverse.insert(instrument.instrument_name) }
         }
@@ -454,42 +387,6 @@ struct Deribit: Exchange {
         return message.params.data.map { row in
             Trade(market: "\(id):\(row.instrument_name)", timestamp: row.timestamp, price: row.price, size: catalog.toBase(row.instrument_name, size: row.amount, price: row.price), side: row.direction, liquidation: row.liquidation != nil)
         }
-    }
-}
-
-private struct BitstampMessage: Decodable {
-    struct Row: Decodable {
-        let microtimestamp: Num
-        let price: Num
-        let amount: Num
-        let type: Int
-    }
-    let event: String
-    let channel: String
-    let data: Row
-}
-
-struct Bitstamp: Exchange {
-    let id = "BITSTAMP"
-    let productURLs = ["https://www.bitstamp.net/api/v2/trading-pairs-info/"]
-    let socketURL = "wss://ws.bitstamp.net/"
-
-    private struct Pair: Decodable { let url_symbol: String }
-
-    func catalog(from responses: [Data]) throws -> Catalog {
-        Catalog(pairs: Set(try require([Pair].self, responses[0], id).map(\.url_symbol)))
-    }
-
-    func subscriptions(pair: String, index: Int) -> [String] {
-        [#"{"event":"bts:subscribe","data":{"channel":"live_trades_\#(pair)"}}"#]
-    }
-
-    func parse(_ data: Data, catalog: Catalog, state: inout SocketState) -> [Trade] {
-        guard let message = decode(BitstampMessage.self, data), message.event == "trade", message.data.amount.value != 0,
-              let pair = message.channel.split(separator: "_").last
-        else { return [] }
-        let row = message.data
-        return [Trade(market: "\(id):\(pair)", timestamp: (row.microtimestamp.value / 1000).rounded(.down), price: row.price.value, size: row.amount.value, side: row.type == 0 ? .buy : .sell, liquidation: false)]
     }
 }
 
@@ -522,10 +419,11 @@ private struct OkxMessage: Decodable {
     let data: [Row]
 }
 
-struct Okx: Exchange {
+struct Okx: ProxiedExchange {
     let id = "OKEX"
     let productURLs = ["https://www.okx.com/api/v5/public/instruments?instType=SWAP"]
     let socketURL = "wss://ws.okx.com:8443/ws/v5/public"
+    let templates = ["{}-USDT-SWAP", "{}-USD-SWAP"]
 
     func catalog(from responses: [Data]) throws -> Catalog {
         var catalog = Catalog()
@@ -563,26 +461,6 @@ struct Okx: Exchange {
     }
 }
 
-let exchanges: [String: any Exchange] = Dictionary(
-    uniqueKeysWithValues: ([Binance(), BinanceFutures(), Bitfinex(), Bitmex(), Bybit(), Coinbase(), Deribit(), Bitstamp(), Okx()] as [any Exchange]).map { ($0.id, $0) }
-)
-
-// aggr's default btc markets (store/defaultPanes.json)
-public let markets = [
-    "BINANCE_FUTURES:btcusd_perp",
-    "BITFINEX:BTCUSD",
-    "BITMEX:XBTUSD",
-    "BYBIT:BTCUSD",
-    "COINBASE:BTC-USD",
-    "DERIBIT:BTC-PERPETUAL",
-    "BINANCE:btcusdt",
-    "BINANCE_FUTURES:btcusdt",
-    "BITFINEX:BTCUST",
-    "BITFINEX:BTCF0:USTF0",
-    "BITMEX:XBTUSDT",
-    "BYBIT:BTCUSDT",
-    "COINBASE:BTC-USDT",
-    "BITSTAMP:btcusd",
-    "OKEX:BTC-USD-SWAP",
-    "OKEX:BTC-USDT-SWAP"
-]
+// perp exchanges, in aggr's default order (store/defaultPanes.json). aggr's defaults also had bitmex,
+// which shut down, and coinbase, whose perps aren't in the product list aggr's proxy serves
+let exchanges: [any Exchange] = [BinanceFutures(), Bitfinex(), Bybit(), Deribit(), Okx()]

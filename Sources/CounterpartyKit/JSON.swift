@@ -84,9 +84,3 @@ enum JSON: Decodable, Sendable {
 func decode<T: Decodable>(_ type: T.Type, _ data: Data) -> T? {
     try? JSONDecoder().decode(type, from: data)
 }
-
-// iso dates with any number of fraction digits (coinbase sends microseconds), in milliseconds
-func milliseconds(iso text: String) -> Double? {
-    guard let date = try? Date(text, strategy: Date.ISO8601FormatStyle(includingFractionalSeconds: true)) else { return nil }
-    return (date.timeIntervalSince1970 * 1000).rounded(.down)
-}
