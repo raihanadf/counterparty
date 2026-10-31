@@ -33,6 +33,19 @@ final class BookModel {
         )
     }
 
+    // how many dom views show this book. a timeframe change swaps the dom view for a new one, and the
+    // old one can leave after the new one arrived: the stream only stops when the last one is gone
+    @ObservationIgnored private var viewers = 0
+
+    func shown() {
+        viewers += 1
+    }
+
+    func hidden() {
+        viewers -= 1
+        if viewers == 0 { stop() }
+    }
+
     func stop() {
         task?.cancel()
         task = nil

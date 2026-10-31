@@ -7,6 +7,7 @@ struct CounterpartyApp: App {
     @State private var workspace = Workspace()
     @State private var themes = ThemeStore()
     @State private var help = HelpMode()
+    @State private var updater = Updater()
 
     init() {
         // a bare executable (swift run) starts as a background process without this
@@ -15,11 +16,12 @@ struct CounterpartyApp: App {
 
     var body: some Scene {
         Window("Counterparty", id: "main") {
-            ContentView(workspace: workspace, themes: themes)
+            ContentView(workspace: workspace, themes: themes, updater: updater)
                 .environment(help)
                 .frame(minWidth: 900, minHeight: 560)
                 .task {
                     NSApplication.shared.activate()
+                    updater.start()
                     await workspace.start()
                 }
         }
@@ -27,7 +29,7 @@ struct CounterpartyApp: App {
         .commands { AppCommands(workspace: workspace, themes: themes, help: help) }
 
         Settings {
-            SettingsView(themes: themes)
+            SettingsView(themes: themes, updater: updater)
         }
     }
 }
@@ -91,11 +93,14 @@ struct AppCommands: Commands {
 struct ContentView: View {
     let workspace: Workspace
     let themes: ThemeStore
+    let updater: Updater
 
     @AppStorage(Keys.showIndicator) private var showIndicator = true
     @AppStorage(Keys.showDom) private var showDom = true
     @AppStorage(Keys.timeframe) private var timeframe = 60
     @Environment(HelpMode.self) private var help
+    // the launch intro plays once, over everything, until the markets are in
+    @State private var introDone = false
 
     var body: some View {
         let theme = themes.theme
@@ -149,10 +154,19 @@ struct ContentView: View {
         .toolbarBackground(theme.colors.panel.color, for: .windowToolbar)
         .preferredColorScheme(theme.appearance == .light ? .light : .dark)
         .tint(theme.colors.accent.color)
+        .overlay {
+            if !introDone {
+                IntroView(ready: workspace.selected != nil, theme: theme) { introDone = true }
+            }
+        }
         // the other tabs' history loads in the background, in the same timeframe
         .task(id: "\(timeframe)|\(workspace.tabs.map(\.id))") { await workspace.prefetch(timeframe: timeframe) }
         .sheet(item: Binding(get: { workspace.search }, set: { workspace.search = $0 })) { mode in
             CoinPicker(workspace: workspace, mode: mode, theme: theme)
+        }
+        // a new version is out: what's new, install now or later. it waits for the intro to finish
+        .sheet(item: Binding(get: { introDone ? updater.prompt : nil }, set: { if $0 == nil { updater.later() } })) { release in
+            UpdatePrompt(updater: updater, release: release, theme: theme)
         }
     }
 

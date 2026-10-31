@@ -24,6 +24,7 @@ live order flow for crypto perps, the same data as [aggr.trade](https://aggr.tra
 - trackpad gestures, tradingview style
 - 9 themes, or import your own
 - works behind dns blocks
+- updates itself
 
 ## build
 

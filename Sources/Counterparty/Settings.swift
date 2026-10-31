@@ -4,12 +4,15 @@ import UniformTypeIdentifiers
 
 struct SettingsView: View {
     let themes: ThemeStore
+    let updater: Updater
 
     @State private var exportError: String?
 
     var body: some View {
         let theme = themes.theme
         Form {
+            updates(theme)
+
             Section {
                 // a swatch of each theme's background, candles and accent, click to switch
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 112), spacing: 12)], spacing: 16) {
@@ -140,5 +143,113 @@ struct SettingsView: View {
         } catch {
             exportError = "Export failed: \(error.localizedDescription)"
         }
+    }
+}
+
+extension SettingsView {
+    @ViewBuilder
+    private func updates(_ theme: Theme) -> some View {
+        @Bindable var updater = updater
+        Section {
+            if let current = updater.current {
+                LabeledContent("Installed") { Text(current).font(theme.mono()) }
+                LabeledContent("Status") {
+                    HStack(spacing: 10) {
+                        switch updater.phase {
+                        case .idle: Text("not checked yet").foregroundStyle(theme.colors.muted.color)
+                        case .checking: ProgressView().controlSize(.small)
+                        case .upToDate: Text("up to date").foregroundStyle(theme.colors.muted.color)
+                        case .available: Text("\(updater.latest!.version) available").foregroundStyle(theme.colors.accent.color)
+                        case .installing: Text("installing…").foregroundStyle(theme.colors.accent.color)
+                        case .failed(let reason): Text(reason).foregroundStyle(theme.colors.statusDown.color).textSelection(.enabled)
+                        }
+                        Button("Check Now") { Task { await updater.check() } }
+                            .disabled(updater.phase == .checking || updater.phase == .installing)
+                    }
+                }
+                Toggle("Check for updates automatically", isOn: $updater.automatic)
+                if let release = updater.latest, updater.phase == .available || updater.phase == .installing {
+                    UpdateNotes(release: release, theme: theme)
+                    Button(updater.phase == .installing ? "Installing…" : "Install and Restart") {
+                        Task { await updater.install() }
+                    }
+                    .disabled(updater.phase == .installing)
+                }
+            } else {
+                Text("Running from source, there's no installed app to update. Build it with ./bundle.sh.")
+                    .foregroundStyle(theme.colors.muted.color)
+            }
+        } header: {
+            CapsLabel("Updates", theme: theme)
+        }
+    }
+}
+
+// the release's notes, as github shows them: inline markdown, line breaks kept
+struct UpdateNotes: View {
+    let release: Updater.Release
+    let theme: Theme
+
+    var body: some View {
+        if let notes = release.notes {
+            ScrollView {
+                Text(LocalizedStringKey(notes))
+                    .font(theme.mono(-1))
+                    .foregroundStyle(theme.colors.text.color)
+                    .lineSpacing(3)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .textSelection(.enabled)
+            }
+            .frame(maxHeight: 220)
+        }
+    }
+}
+
+// the popup when a new version is out: what's new, install now or later
+struct UpdatePrompt: View {
+    let updater: Updater
+    let release: Updater.Release
+    let theme: Theme
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 14) {
+                Image(nsImage: NSApp.applicationIconImage).resizable().frame(width: 56, height: 56)
+                VStack(alignment: .leading, spacing: 4) {
+                    CapsLabel("Update available", theme: theme, color: theme.colors.accent)
+                    Text("Counterparty \(release.version)").font(theme.mono(4, weight: .semibold))
+                    Text("You have \(updater.current!).").foregroundStyle(theme.colors.muted.color)
+                }
+            }
+            if release.notes != nil {
+                theme.colors.border.color.frame(height: 1)
+                CapsLabel("What's new", theme: theme)
+                UpdateNotes(release: release, theme: theme)
+            }
+            if case .failed(let reason) = updater.phase {
+                Text("Update failed: \(reason)").foregroundStyle(theme.colors.statusDown.color).textSelection(.enabled)
+            }
+            HStack {
+                Text("The app restarts on its own, your tabs come back.")
+                    .font(theme.mono(-2))
+                    .foregroundStyle(theme.colors.muted.color)
+                Spacer()
+                Button("Later") { updater.later() }
+                    .keyboardShortcut(.cancelAction)
+                    .disabled(updater.phase == .installing)
+                Button(updater.phase == .installing ? "Installing…" : "Install and Restart") {
+                    Task { await updater.install() }
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(updater.phase == .installing)
+            }
+        }
+        .font(theme.mono(-1))
+        .foregroundStyle(theme.colors.text.color)
+        .padding(20)
+        .frame(width: 460)
+        .background(theme.colors.panel.color)
+        .tint(theme.colors.accent.color)
+        .preferredColorScheme(theme.appearance == .light ? .light : .dark)
     }
 }

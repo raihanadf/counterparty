@@ -54,7 +54,8 @@ struct DomView: View {
         }
         .font(theme.mono())
         .task(id: market) { book.watch(market) }
-        .onDisappear { book.stop() }
+        .onAppear { book.shown() }
+        .onDisappear { book.hidden() }
     }
 
     private func controls(_ market: String) -> some View {
