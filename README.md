@@ -1,12 +1,14 @@
 <div align="center">
 
-<img src="Assets/AppIcon.png" width="128" alt="counterparty icon">
+<img src="https://raw.githubusercontent.com/raihanadf/counterparty/main/Assets/AppIcon.png?v=0.1.0" width="128" alt="counterparty icon">
 
 # counterparty
 
 **see who's on the other side of the trade.**
 
 live order flow for crypto perps, the same data as [aggr.trade](https://aggr.trade), in a native mac app.
+
+[**download for mac**](https://github.com/raihanadf/counterparty/releases/latest/download/Counterparty.dmg)
 
 <sub>free · macos 14 or later · swift, no dependencies</sub>
 
