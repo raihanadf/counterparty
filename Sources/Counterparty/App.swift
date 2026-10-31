@@ -199,34 +199,41 @@ struct HeaderBar: View {
         }
         .foregroundStyle(theme.colors.text.color)
         .controlSize(.small)
-        .padding(.horizontal, 12)
+        .padding(.horizontal, 16)
         .padding(.vertical, 8)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(theme.colors.panel.color)
     }
 
     private func row(subtitle: Bool, labels: Bool) -> some View {
-        HStack(spacing: labels ? 18 : 12) {
+        HStack(spacing: labels ? 20 : 12) {
             if theme.show.headerPrice {
                 LivePrice(session: session)
-                    .font(theme.mono(3, weight: .semibold))
+                    .font(theme.mono(6, weight: .medium))
+                    .tracking(-0.4)
+                    .monospacedDigit()
                     .foregroundStyle(theme.colors.text.color)
                     .fixedSize()
                     .explain(Hint(
                         "Last traded price: the newest trade from any of \(session.coin)'s perps, refreshed twice a second. It mixes exchanges, so it can sit a few dollars off any single exchange's own price.",
                         example: "Fine: this reads 77,140 while Binance shows 77,138, that's two venues a tick apart. Not fine: it sits far from the chart's last close for long, one venue is lagging; check the bar at the bottom for a market that's down."
                     ))
-                    .frame(minWidth: 90, alignment: .leading)
+                    .frame(minWidth: 110, alignment: .leading)
             }
             Button {
                 workspace.search = .replace
             } label: {
-                HStack(spacing: 4) {
-                    Text(session.coin).font(theme.mono(1, weight: .semibold))
-                    Image(systemName: "chevron.down").font(.system(size: 9, weight: .semibold))
+                HStack(spacing: 6) {
+                    Text(session.coin).font(theme.mono(1, weight: .semibold)).tracking(0.6)
+                    Image(systemName: "chevron.down").font(.system(size: 8, weight: .medium))
+                        .foregroundStyle(theme.colors.muted.color)
                 }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .overlay(RoundedRectangle(cornerRadius: 2).strokeBorder(theme.colors.border.color))
+                .contentShape(.rect)
             }
-            .buttonStyle(.borderless)
+            .buttonStyle(.plain)
             .foregroundStyle(theme.colors.text.color)
             .help("Search coins (⌘P)")
             .fixedSize()
@@ -235,8 +242,7 @@ struct HeaderBar: View {
                 example: "⌘P then type SOL and ⏎ swaps this tab to SOL; ⌘⏎ opens SOL in a new tab and keeps this one streaming."
             ))
             if subtitle {
-                Text("\(session.markets.count) perps")
-                    .foregroundStyle(theme.colors.muted.color)
+                CapsLabel("\(session.markets.count) perps", theme: theme)
                     .fixedSize()
                     .explain(Hint(
                         "\(session.markets.count) perpetual futures feed this coin: every USDT, USDC and coin-margined perp of it on Binance Futures, Bitfinex, Bybit, Deribit and OKX. Each one is listed in the bar at the bottom.",
@@ -244,21 +250,19 @@ struct HeaderBar: View {
                     ))
             }
             Spacer(minLength: 12)
-            Toggle("Indicator", isOn: $showIndicator).toggleStyle(.switch).fixedSize()
+            Toggle("Indicator", isOn: $showIndicator).toggleStyle(LampToggleStyle(theme: theme)).fixedSize()
                 .explain(Hint("Shows or hides the chart (⌥⌘I).", example: "Turn it off to give the whole window to the order book while you watch a level get tested."))
-            Picker("Timeframe", selection: $timeframe) {
-                ForEach(timeframes, id: \.0) { Text($0.1).tag($0.0) }
+            RuleSegments(items: timeframes.map(\.0), selection: $timeframe, theme: theme) { seconds, _ in
+                Text(timeframes.first { $0.0 == seconds }!.1).font(theme.mono(-1))
             }
-            .pickerStyle(.segmented)
-            .labelsHidden()
             .fixedSize()
             .disabled(!showIndicator)
             .explain(Hint(
                 "How much time one candle covers. History comes from aggr's server, so every timeframe has the same data aggr.trade shows.",
                 example: "5m or 15m to see the trend and the levels that matter. 5s or 15s to watch how price acts right at one of those levels. Trading off 5s alone means reacting to noise."
             ))
-            theme.colors.border.color.frame(width: 1, height: 18)
-            Toggle("DOM", isOn: $showDom).toggleStyle(.switch).fixedSize()
+            theme.colors.border.color.frame(width: 1, height: 14)
+            Toggle("DOM", isOn: $showDom).toggleStyle(LampToggleStyle(theme: theme)).fixedSize()
                 .explain(Hint("Shows or hides the order book ladder (⌥⌘D).", example: "Turn it off when you only want the chart; the book keeps streaming in the background so it's ready when it comes back."))
         }
     }
@@ -286,32 +290,39 @@ struct TabStrip: View {
     var body: some View {
         HStack(spacing: 0) {
             ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 2) {
+                HStack(spacing: 0) {
                     ForEach(Array(workspace.tabs.enumerated()), id: \.element.id) { index, session in
                         TabItem(workspace: workspace, session: session, number: index + 1, theme: theme)
                     }
                 }
-                .padding(.horizontal, 6)
+                .padding(.horizontal, 8)
             }
             Button {
                 help.on.toggle()
             } label: {
                 Image(systemName: help.on ? "questionmark.circle.fill" : "questionmark.circle")
+                    .font(.system(size: 13, weight: .light))
+                    .frame(width: 28, height: 28)
+                    .contentShape(.rect)
             }
-            .buttonStyle(.borderless)
+            .buttonStyle(.plain)
             .foregroundStyle((help.on ? theme.colors.accent : theme.colors.muted).color)
             .help(help.on ? "Stop explaining (esc)" : "Explain what everything means: hover anything (⌘/)")
-            .padding(.leading, 10)
+            theme.colors.border.color.frame(width: 1, height: 14)
             Button {
                 workspace.search = .newTab
             } label: {
                 Image(systemName: "plus")
+                    .font(.system(size: 12, weight: .light))
+                    .frame(width: 28, height: 28)
+                    .contentShape(.rect)
             }
-            .buttonStyle(.borderless)
+            .buttonStyle(.plain)
+            .foregroundStyle(theme.colors.muted.color)
             .help("New tab (⌘T)")
-            .padding(.horizontal, 10)
+            .padding(.trailing, 8)
         }
-        .frame(height: 30)
+        .frame(height: 32)
         .background(theme.colors.background.color)
     }
 }
@@ -325,8 +336,8 @@ struct TabItem: View {
 
     var body: some View {
         let selected = workspace.selected === session
-        HStack(spacing: 6) {
-            Text(session.coin).font(theme.mono(0, weight: selected ? .semibold : .regular))
+        HStack(spacing: 8) {
+            Text(session.coin).font(theme.mono(-1, weight: selected ? .semibold : .medium)).tracking(0.6)
             // green or red against the last closed bar, so a background tab still says which way it's going
             LivePrice(session: session)
                 .font(theme.mono(-1))
@@ -335,18 +346,26 @@ struct TabItem: View {
                 Button {
                     workspace.close(session)
                 } label: {
-                    Image(systemName: "xmark").font(.system(size: 8, weight: .bold))
+                    Image(systemName: "xmark").font(.system(size: 7, weight: .semibold))
+                        .frame(width: 12, height: 12)
+                        .contentShape(.rect)
                 }
-                .buttonStyle(.borderless)
+                .buttonStyle(.plain)
                 .foregroundStyle(theme.colors.muted.color)
                 .help("Close tab (⌘W)")
             }
         }
         .foregroundStyle((selected ? theme.colors.text : theme.colors.muted).color)
-        .padding(.horizontal, 10)
-        .padding(.vertical, 5)
-        .background(selected ? theme.colors.panel.color : .clear, in: .rect(cornerRadius: 5))
-        .overlay(RoundedRectangle(cornerRadius: 5).stroke(selected ? theme.colors.border.color : .clear))
+        .padding(.horizontal, 12)
+        .frame(maxHeight: .infinity)
+        // the open tab is lit: the header's panel under a brass rule, the way a drawer pulls out
+        .background(selected ? theme.colors.panel.color : .clear)
+        .overlay(alignment: .top) {
+            if selected { theme.colors.accent.color.frame(height: 1.5) }
+        }
+        .overlay(alignment: .trailing) {
+            if !selected { theme.colors.border.color.frame(width: 1, height: 12) }
+        }
         .contentShape(.rect)
         .onTapGesture { workspace.select(session) }
         .help(number <= 9 ? "⌘\(number)" : "")
@@ -375,10 +394,10 @@ struct MarketsBar: View {
             ForEach(session.markets, id: \.self) { market in
                 let status = session.statuses[market]
                 let count = session.tradeCounts[market]
-                HStack(spacing: 5) {
-                    Circle().fill(color(status, live: count != nil)).frame(width: 7, height: 7)
+                HStack(spacing: 6) {
+                    Circle().fill(color(status, live: count != nil)).frame(width: 5, height: 5)
                     Text(market).foregroundStyle(theme.colors.muted.color)
-                    Text("\(count ?? 0)").foregroundStyle(theme.colors.text.color)
+                    Text("\(count ?? 0)").foregroundStyle(theme.colors.text.color).monospacedDigit()
                 }
                 .help(describe(status))
                 .explain(Hint(
@@ -389,8 +408,8 @@ struct MarketsBar: View {
             // an exchange whose product list failed has no markets to show, so it gets its own chip
             if let failures {
                 ForEach(failures, id: \.exchange) { failure in
-                    HStack(spacing: 5) {
-                        Circle().fill(theme.colors.statusDown.color).frame(width: 7, height: 7)
+                    HStack(spacing: 6) {
+                        Circle().fill(theme.colors.statusDown.color).frame(width: 5, height: 5)
                         Text("\(failure.exchange) products failed").foregroundStyle(theme.colors.muted.color)
                     }
                     .help(failure.reason)
@@ -401,9 +420,9 @@ struct MarketsBar: View {
                 }
             }
         }
-        .font(theme.mono(-1))
-        .padding(.horizontal, 12)
-        .padding(.vertical, 6)
+        .font(theme.mono(-2))
+        .padding(.horizontal, 16)
+        .padding(.vertical, 8)
     }
 
     // nil is a socket that hasn't reported yet
@@ -428,8 +447,8 @@ struct MarketsBar: View {
 
 // wraps the market chips onto as many lines as the window needs
 struct FlowLayout: Layout {
-    var spacing = 14.0
-    var lineSpacing = 4.0
+    var spacing = 20.0
+    var lineSpacing = 6.0
 
     func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
         let width = proposal.width ?? .infinity
@@ -460,6 +479,86 @@ struct FlowLayout: Layout {
             subview.place(at: CGPoint(x: x, y: y), proposal: ProposedViewSize(size))
             x += size.width + spacing
             line = max(line, size.height)
+        }
+    }
+}
+
+// a label on the chrome: caps, letter-spaced, in the theme's muted colour
+struct CapsLabel: View {
+    let text: String
+    let theme: Theme
+    var color: ThemeColor?
+
+    init(_ text: String, theme: Theme, color: ThemeColor? = nil) {
+        self.text = text
+        self.theme = theme
+        self.color = color
+    }
+
+    var body: some View {
+        Text(text.uppercased())
+            .font(theme.caps())
+            .tracking(1.2)
+            .foregroundStyle((color ?? theme.colors.muted).color)
+    }
+}
+
+// a quiet switch: a small square lamp that lights in the accent, then the label in caps
+struct LampToggleStyle: ToggleStyle {
+    let theme: Theme
+
+    func makeBody(configuration: Configuration) -> some View {
+        let on = configuration.isOn
+        Button {
+            configuration.isOn.toggle()
+        } label: {
+            HStack(spacing: 8) {
+                RoundedRectangle(cornerRadius: 1.5)
+                    .fill(on ? theme.colors.accent.color : .clear)
+                    .overlay(RoundedRectangle(cornerRadius: 1.5).strokeBorder((on ? theme.colors.accent : theme.colors.muted).color, lineWidth: 1))
+                    .frame(width: 7, height: 7)
+                configuration.label
+                    .textCase(.uppercase)
+                    .font(theme.caps())
+                    .tracking(1.2)
+                    .foregroundStyle((on ? theme.colors.text : theme.colors.muted).color)
+            }
+            .padding(.vertical, 4)
+            .contentShape(.rect)
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+// a row of choices where the chosen one sits on a brass rule: the header's timeframes and the search's tabs
+struct RuleSegments<Value: Hashable, Label: View>: View {
+    let items: [Value]
+    @Binding var selection: Value
+    let theme: Theme
+    @ViewBuilder let label: (Value, Bool) -> Label
+
+    @Environment(\.isEnabled) private var enabled
+
+    var body: some View {
+        HStack(spacing: 0) {
+            ForEach(items, id: \.self) { item in
+                let chosen = item == selection
+                Button {
+                    selection = item
+                } label: {
+                    label(item, chosen)
+                        .foregroundStyle((chosen && enabled ? theme.colors.text : theme.colors.muted).color)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .overlay(alignment: .bottom) {
+                            if chosen {
+                                (enabled ? theme.colors.accent : theme.colors.border).color.frame(height: 1.5).padding(.horizontal, 6)
+                            }
+                        }
+                        .contentShape(.rect)
+                }
+                .buttonStyle(.plain)
+            }
         }
     }
 }

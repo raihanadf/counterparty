@@ -57,22 +57,34 @@ extension View {
 private struct Explain: ViewModifier {
     @Environment(HelpMode.self) private var help
     @State private var id = UUID()
+    // where the cursor sits in this view, nil when it's outside
+    @State private var cursor: CGPoint?
     let hint: (CGPoint, CGSize) -> Hint?
 
     func body(content: Content) -> some View {
         content.overlay {
             if help.on {
                 GeometryReader { geometry in
+                    // worked out again every time the view under it redraws, so a card over the book or the
+                    // tape follows the live numbers instead of describing what was there when the mouse stopped
+                    let current = cursor.flatMap { hint($0, geometry.size) }
                     Color.clear
                         .contentShape(.rect)
                         .onContinuousHover { phase in
                             switch phase {
                             case .active(let point):
+                                cursor = point
                                 let origin = geometry.frame(in: .named(HelpMode.space)).origin
                                 help.show(hint(point, geometry.size), at: CGPoint(x: origin.x + point.x, y: origin.y + point.y), owner: id)
                             case .ended:
+                                cursor = nil
                                 help.hide(owner: id)
                             }
+                        }
+                        .onChange(of: current) {
+                            guard let cursor else { return }
+                            let origin = geometry.frame(in: .named(HelpMode.space)).origin
+                            help.show(current, at: CGPoint(x: origin.x + cursor.x, y: origin.y + cursor.y), owner: id)
                         }
                         .onTapGesture {}
                 }
@@ -89,28 +101,34 @@ struct HelpCard: View {
     var body: some View {
         GeometryReader { geometry in
             if let hint = help.hint {
-                let width = min(340, geometry.size.width - 16)
-                let x = min(help.at.x + 14, geometry.size.width - width - 8)
-                let card = VStack(alignment: .leading, spacing: 8) {
+                let width = min(320, geometry.size.width - 16)
+                // to the right of the cursor, or to its left when there's no room, never on top of the pointer
+                let right = help.at.x + 16 + width <= geometry.size.width - 8
+                let x = right ? help.at.x + 16 : max(8, help.at.x - 16 - width)
+                let card = VStack(alignment: .leading, spacing: 10) {
                     Text(hint.text).foregroundStyle(theme.colors.text.color)
                     if let example = hint.example {
-                        theme.colors.border.color.frame(height: 1)
-                        Text("Example").fontWeight(.semibold).foregroundStyle(theme.colors.accent.color)
-                        Text(example).foregroundStyle(theme.colors.text.color.opacity(0.8))
+                        VStack(alignment: .leading, spacing: 4) {
+                            CapsLabel("Example", theme: theme, color: theme.colors.accent)
+                            Text(example).foregroundStyle(theme.colors.muted.color)
+                        }
+                        .padding(.top, 10)
+                        .overlay(alignment: .top) { theme.colors.border.color.frame(height: 1) }
                     }
                 }
                 .font(theme.mono(-1))
+                .lineSpacing(3)
                 .fixedSize(horizontal: false, vertical: true)
-                .padding(10)
+                .padding(12)
                 .frame(width: width, alignment: .leading)
-                .background(theme.colors.panel.color, in: .rect(cornerRadius: 6))
-                .overlay(RoundedRectangle(cornerRadius: 6).stroke(theme.colors.accent.color.opacity(0.6)))
-                .shadow(color: .black.opacity(0.35), radius: 8, y: 3)
+                .background(theme.colors.panel.color, in: .rect(cornerRadius: 4))
+                .overlay(RoundedRectangle(cornerRadius: 4).strokeBorder(theme.colors.accent.color.opacity(0.45)))
+                .shadow(color: .black.opacity(0.45), radius: 12, y: 4)
                 // below the cursor in the top half of the window, above it in the bottom half
                 if help.at.y < geometry.size.height / 2 {
-                    card.offset(x: x, y: help.at.y + 20)
+                    card.offset(x: x, y: help.at.y + 18)
                 } else {
-                    card.frame(height: max(0, help.at.y - 12), alignment: .bottom).offset(x: x)
+                    card.frame(height: max(0, help.at.y - 10), alignment: .bottom).offset(x: x)
                 }
             }
         }

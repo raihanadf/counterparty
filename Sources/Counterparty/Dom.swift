@@ -59,14 +59,16 @@ struct DomView: View {
 
     private func controls(_ market: String) -> some View {
         HStack(spacing: 8) {
+            CapsLabel("Book", theme: theme)
             Menu {
                 ForEach(venues, id: \.self) { exchange in
                     Button(shortName(exchange)) { venue = exchange }
                 }
             } label: {
-                Text(venueLabel(market))
+                Text(venueLabel(market)).font(theme.mono(-1, weight: .medium))
             }
             .menuStyle(.borderlessButton)
+            .tint(theme.colors.text.color)
             .fixedSize()
             .disabled(venues.count < 2)
             .help("Which exchange's book to watch")
@@ -77,9 +79,10 @@ struct DomView: View {
             Spacer(minLength: 0)
         }
         .controlSize(.small)
-        .padding(.horizontal, 8)
-        .padding(.vertical, 4)
+        .padding(.horizontal, 12)
+        .frame(height: 30)
         .background(theme.colors.panel.color)
+        .overlay(alignment: .bottom) { theme.colors.border.color.frame(height: 1) }
     }
 
     private func shortName(_ exchange: String) -> String {
@@ -213,10 +216,11 @@ struct BookLadderView: View {
     }
 
     // the rows on screen, one venue tick each: the row nearest the mid in the middle, `half` above and below.
-    // the left and right columns are `side` wide, the prices sit between them
+    // the left and right columns are `side` wide, the prices sit between them with a gutter either side
     private func grid(_ size: CGSize, _ step: Double) -> (centerKey: Int, half: Int, side: Double)? {
         guard let mid = book.mid else { return nil }
-        let priceWidth = Double(max(7, decimals + 2)) * (theme.font.size - 1) * 0.62 + 10
+        // as wide as the mid's own label (77,351.70 has its comma and decimals), plus 12 of air each side
+        let priceWidth = Double(max(7, format(mid).count)) * (theme.font.size - 1) * 0.62 + 24
         return (
             Int((mid / step).rounded()),
             max(2, (Int(size.height / theme.layout.domRowHeight) - 1) / 2),
@@ -246,33 +250,53 @@ struct BookLadderView: View {
         }
         let largest = max(1, rows.map { max($0.bid, $0.ask) }.max() ?? 1)
         let side = grid.side
-        func label(_ text: String, color: Color) -> Text {
-            Text(text).font(theme.mono(-1)).foregroundStyle(color)
+        let colors = theme.colors
+        func label(_ text: String, color: Color, weight: Font.Weight = .regular) -> Text {
+            Text(text).font(theme.mono(-1, weight: weight)).foregroundStyle(color)
         }
+        func hairline(_ y: Double, _ from: Double, _ to: Double, _ color: Color) {
+            context.fill(Path(CGRect(x: from, y: y, width: to - from, height: 1)), with: .color(color))
+        }
+
+        // the price column is ruled off from the two sides like a ledger
+        context.fill(Path(CGRect(x: side, y: 0, width: 1, height: size.height)), with: .color(colors.grid.color))
+        context.fill(Path(CGRect(x: size.width - side - 1, y: 0, width: 1, height: size.height)), with: .color(colors.grid.color))
 
         for (index, row) in rows.enumerated() {
             let y = Double(index) * rowHeight
-            if row.key == grid.centerKey {
-                context.fill(Path(CGRect(x: 0, y: y, width: size.width, height: rowHeight)), with: .color(theme.colors.domCurrentRow.color))
+            let mid = row.key == grid.centerKey
+            // every tenth tick is a round price, a faint line under it gives the eye somewhere to count from
+            if row.key % 10 == 0 && !mid {
+                hairline(y + rowHeight - 1, 0, size.width, colors.grid.color)
             }
+            if mid {
+                context.fill(Path(CGRect(x: 0, y: y, width: size.width, height: rowHeight)), with: .color(colors.domCurrentRow.color))
+                hairline(y, 0, size.width, colors.accent.color.opacity(0.55))
+                hairline(y + rowHeight - 1, 0, size.width, colors.accent.color.opacity(0.55))
+            }
+            // bars grow out from the price column, inset so neighbouring rows stay apart
             if theme.show.domBars && row.bid > 0 {
                 let width = side * row.bid / largest
-                context.fill(Path(CGRect(x: side - width, y: y + 2, width: width, height: rowHeight - 4)), with: .color(theme.colors.domBuyBar.color))
+                context.fill(Path(CGRect(x: side - width, y: y + 3, width: width, height: rowHeight - 6)), with: .color(colors.domBuyBar.color))
             }
             if theme.show.domBars && row.ask > 0 {
                 let width = side * row.ask / largest
-                context.fill(Path(CGRect(x: size.width - side, y: y + 2, width: width, height: rowHeight - 4)), with: .color(theme.colors.domSellBar.color))
+                context.fill(Path(CGRect(x: size.width - side, y: y + 3, width: width, height: rowHeight - 6)), with: .color(colors.domSellBar.color))
             }
             if row.bid > 0 {
-                context.draw(label(quantity(row.bid), color: theme.colors.buy.color), at: CGPoint(x: side - 6, y: y + rowHeight / 2), anchor: .trailing)
+                context.draw(label(quantity(row.bid), color: colors.buy.color), at: CGPoint(x: side - 8, y: y + rowHeight / 2), anchor: .trailing)
             }
             if row.ask > 0 {
-                context.draw(label(quantity(row.ask), color: theme.colors.sell.color), at: CGPoint(x: size.width - side + 6, y: y + rowHeight / 2), anchor: .leading)
+                context.draw(label(quantity(row.ask), color: colors.sell.color), at: CGPoint(x: size.width - side + 8, y: y + rowHeight / 2), anchor: .leading)
             }
-            // prices outside the book are the empty rows between the two sides
-            let inBook = row.bid > 0 || row.ask > 0 || row.key == grid.centerKey
+            // prices outside the book are the empty rows between the two sides, the mid row is set in brass
+            let inBook = row.bid > 0 || row.ask > 0 || mid
             context.draw(
-                label(format(Double(row.key) * step), color: (inBook ? theme.colors.text : theme.colors.muted).color),
+                label(
+                    format(Double(row.key) * step),
+                    color: mid ? colors.accent.color : inBook ? colors.text.color : colors.muted.color.opacity(0.7),
+                    weight: mid ? .semibold : .regular
+                ),
                 at: CGPoint(x: size.width / 2, y: y + rowHeight / 2),
                 anchor: .center
             )
@@ -359,13 +383,14 @@ struct BookLadderView: View {
         let rowHeight = theme.layout.domRowHeight
         let shown = tape.prefix(max(1, rows - 1))
         return VStack(spacing: 0) {
+            // the header is exactly one row tall, the (?) text counts rows from it
             HStack(spacing: 4) {
-                Text("time").frame(maxWidth: .infinity, alignment: .leading)
-                Text("size")
+                CapsLabel("Time", theme: theme).frame(maxWidth: .infinity, alignment: .leading)
+                CapsLabel("Size", theme: theme)
             }
-            .foregroundStyle(theme.colors.muted.color)
-            .padding(.horizontal, 6)
+            .padding(.horizontal, 8)
             .frame(height: rowHeight)
+            .overlay(alignment: .bottom) { theme.colors.border.color.frame(height: 1) }
 
             ForEach(Array(shown.enumerated()), id: \.offset) { _, trade in
                 HStack(spacing: 4) {
@@ -377,7 +402,7 @@ struct BookLadderView: View {
                         .foregroundStyle((trade.side == .buy ? theme.colors.buy : theme.colors.sell).color)
                         .fixedSize()
                 }
-                .padding(.horizontal, 6)
+                .padding(.horizontal, 8)
                 .frame(height: rowHeight)
             }
             Spacer(minLength: 0)

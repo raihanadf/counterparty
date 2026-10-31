@@ -1,10 +1,10 @@
 import Foundation
 
 // themes that ship with the app. each one is the same kind of overlay a theme file is,
-// laid over the default, so they go through the same checks as an imported file
+// laid over the default (atelier), so they go through the same checks as an imported file
 
 extension Theme {
-    static let builtins: [Theme] = [standard] + [light, monochrome, monochromeLight, tradingView, bybit, highContrast, focus, atelier].map {
+    static let builtins: [Theme] = [standard] + [aggr, light, monochrome, monochromeLight, tradingView, bybit, highContrast, focus].map {
         do {
             return try Theme.load(Data($0.utf8))
         } catch {
@@ -12,6 +12,24 @@ extension Theme {
         }
     }
 }
+
+// aggr.trade's green and red, the chart colors are its defaultIndicators.json
+private let aggr = """
+{
+  "name": "Aggr",
+  "colors": {
+    "background": "#0E1116", "panel": "#141922", "border": "#232A36", "text": "#D7DDE6", "muted": "#7D8796",
+    "accent": "#3BCA6D", "buy": "#3BCA6D", "sell": "#EB1E2F",
+    "candleUp": "#3BCA6D", "candleDown": "#D62828", "candleUpBorder": "#3BCA6D", "candleDownBorder": "#EF4352",
+    "wickUp": "#DFD390", "wickDown": "#EF4352",
+    "volumeUp": "#3BCA6D80", "volumeDown": "#EB1E2F80", "deltaUp": "#3BCA6D", "deltaDown": "#EB1E2F",
+    "liquidationBuy": "#FF4CF3", "liquidationSell": "#FFB74D", "cvd": "#3BCA6D",
+    "grid": "#FFFFFF0D", "crosshair": "#FFFFFF4D", "priceTagText": "#FFFFFF",
+    "domBuyBar": "#3BCA6D59", "domSellBar": "#EB1E2F59", "domCurrentRow": "#FFFFFF14",
+    "statusLive": "#3BCA6D", "statusPending": "#FFB74D", "statusDown": "#EB1E2F"
+  }
+}
+"""
 
 private let light = """
 {
@@ -24,7 +42,7 @@ private let light = """
     "wickUp": "#0E9F6E", "wickDown": "#E02424",
     "volumeUp": "#0E9F6E66", "volumeDown": "#E0242466", "deltaUp": "#0E9F6E", "deltaDown": "#E02424",
     "liquidationBuy": "#C026D3", "liquidationSell": "#D97706", "cvd": "#2563EB",
-    "grid": "#0000000F", "crosshair": "#00000059",
+    "grid": "#0000000F", "crosshair": "#00000059", "priceTagText": "#FFFFFF",
     "domBuyBar": "#0E9F6E40", "domSellBar": "#E0242440", "domCurrentRow": "#2563EB1A",
     "statusLive": "#0E9F6E", "statusPending": "#D97706", "statusDown": "#E02424"
   }
@@ -122,37 +140,26 @@ private let highContrast = """
 }
 """
 
-// just price and flow: no volume panels, no grid, no market bar
+// just price and flow: no volume panels, no grid, no market bar. it was laid over aggr's colors,
+// so it lists them itself now that the default is atelier
 private let focus = """
 {
   "name": "Focus",
   "font": { "family": "Menlo", "size": 13 },
   "colors": {
-    "background": "#000000", "panel": "#0A0A0A", "border": "#1F1F1F", "accent": "#F5A524",
+    "background": "#000000", "panel": "#0A0A0A", "border": "#1F1F1F", "text": "#D7DDE6", "muted": "#7D8796",
+    "accent": "#F5A524", "buy": "#3BCA6D", "sell": "#EB1E2F",
     "candleUp": "#26A69A", "candleDown": "#EF5350", "candleUpBorder": "#26A69A", "candleDownBorder": "#EF5350",
-    "wickUp": "#26A69A", "wickDown": "#EF5350", "domBuyBar": "#26A69A55", "domSellBar": "#EF535055"
+    "wickUp": "#26A69A", "wickDown": "#EF5350",
+    "volumeUp": "#3BCA6D80", "volumeDown": "#EB1E2F80", "deltaUp": "#3BCA6D", "deltaDown": "#EB1E2F",
+    "liquidationBuy": "#FF4CF3", "liquidationSell": "#FFB74D", "cvd": "#3BCA6D",
+    "grid": "#FFFFFF0D", "crosshair": "#FFFFFF4D", "priceTagText": "#FFFFFF",
+    "domBuyBar": "#26A69A55", "domSellBar": "#EF535055", "domCurrentRow": "#FFFFFF14",
+    "statusLive": "#3BCA6D", "statusPending": "#FFB74D", "statusDown": "#EB1E2F"
   },
   "show": {
     "headerSubtitle": false, "marketsBar": false, "grid": false, "volume": false, "delta": false, "cvd": false
   },
   "layout": { "domWidth": 360, "domRowHeight": 18, "candleWidth": 0.5 }
-}
-"""
-
-// warm graphite and bone, one muted brass accent: monochrome with a hand-thrown feel
-private let atelier = """
-{
-  "name": "Atelier",
-  "colors": {
-    "background": "#0E0D0C", "panel": "#161513", "border": "#2A2724", "text": "#EAE4D9", "muted": "#8C857A",
-    "accent": "#C2A878", "buy": "#EDE6D8", "sell": "#8C857A",
-    "candleUp": "#EDE6D8", "candleDown": "#7A746B", "candleUpBorder": "#EDE6D8", "candleDownBorder": "#918A7F",
-    "wickUp": "#EDE6D8", "wickDown": "#918A7F",
-    "volumeUp": "#EDE6D84D", "volumeDown": "#7A746B80", "deltaUp": "#EDE6D8", "deltaDown": "#7A746B",
-    "liquidationBuy": "#B9765A", "liquidationSell": "#C2A878", "cvd": "#C2A878",
-    "grid": "#EAE4D90A", "crosshair": "#EAE4D959", "priceTagText": "#0E0D0C",
-    "domBuyBar": "#EDE6D866", "domSellBar": "#6B655B40", "domCurrentRow": "#C2A8781F",
-    "statusLive": "#EDE6D8", "statusPending": "#C2A878", "statusDown": "#B9765A"
-  }
 }
 """

@@ -347,7 +347,9 @@ struct IndicatorView: View {
             }
         }
         .font(theme.mono(-1))
-        .padding(8)
+        .lineSpacing(2)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
         .allowsHitTesting(help.on)
     }
 
@@ -379,10 +381,10 @@ struct IndicatorView: View {
         .buttonStyle(.borderless)
         .font(theme.mono(-1))
         .foregroundStyle(theme.colors.text.color)
-        .padding(.horizontal, 6)
-        .padding(.vertical, 3)
-        .background(theme.colors.panel.color.opacity(0.9), in: .rect(cornerRadius: 4))
-        .overlay(RoundedRectangle(cornerRadius: 4).stroke(theme.colors.border.color))
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .background(theme.colors.panel.color.opacity(0.9), in: .rect(cornerRadius: 2))
+        .overlay(RoundedRectangle(cornerRadius: 2).strokeBorder(theme.colors.border.color))
     }
 
     private func timeLabel(_ time: Int) -> String {
@@ -494,7 +496,7 @@ struct IndicatorView: View {
             let lastY = y(last.close)
             let color = (last.close >= last.open ? colors.candleUp : colors.candleDown).color
             if show.lastPriceLine {
-                plot.stroke(line(CGPoint(x: 0, y: lastY), CGPoint(x: width, y: lastY)), with: .color(color.opacity(0.6)), style: StrokeStyle(lineWidth: 1, dash: [2, 3]))
+                plot.stroke(line(CGPoint(x: 0, y: lastY), CGPoint(x: width, y: lastY)), with: .color(color.opacity(0.6)), style: StrokeStyle(lineWidth: 1, dash: [1, 3]))
             }
             if show.priceAxis && lastY > -8 && lastY < height + 8 {
                 tag(format(last.close), at: CGPoint(x: width + 2, y: lastY), fill: color, text: colors.priceTagText.color, in: &context)
@@ -526,8 +528,8 @@ struct IndicatorView: View {
                 let label = Text(timeLabel(points[index].time)).font(theme.mono(-2)).foregroundStyle(colors.text.color)
                 let size = context.resolve(label).measure(in: CGSize(width: 300, height: 30))
                 let box = CGRect(x: min(max(0, x - size.width / 2 - 6), width - size.width - 12), y: height + 2, width: size.width + 12, height: axisHeight - 4)
-                context.fill(Path(roundedRect: box, cornerRadius: 3), with: .color(colors.panel.color))
-                context.stroke(Path(roundedRect: box, cornerRadius: 3), with: .color(colors.border.color))
+                context.fill(Path(roundedRect: box, cornerRadius: 1.5), with: .color(colors.panel.color))
+                context.stroke(Path(roundedRect: box, cornerRadius: 1.5), with: .color(colors.border.color))
                 context.draw(label, at: CGPoint(x: box.midX, y: box.midY))
             }
         }
@@ -536,8 +538,8 @@ struct IndicatorView: View {
     // a price label box on the price axis
     private func tag(_ text: String, at point: CGPoint, fill: Color, text color: Color, border: Color? = nil, in context: inout GraphicsContext) {
         let box = CGRect(x: point.x, y: point.y - 8, width: axisWidth - 4, height: 16)
-        context.fill(Path(roundedRect: box, cornerRadius: 2), with: .color(fill))
-        if let border { context.stroke(Path(roundedRect: box, cornerRadius: 2), with: .color(border)) }
+        context.fill(Path(roundedRect: box, cornerRadius: 1.5), with: .color(fill))
+        if let border { context.stroke(Path(roundedRect: box, cornerRadius: 1.5), with: .color(border)) }
         context.draw(Text(text).font(theme.mono(-2, weight: .semibold)).foregroundStyle(color), at: CGPoint(x: box.midX, y: box.midY))
     }
 }

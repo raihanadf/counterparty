@@ -157,42 +157,43 @@ struct Theme: Codable, Equatable {
     var show: Show
     var layout: Layout
 
+    // atelier: warm graphite and bone, one muted brass accent. monochrome with a hand-made feel,
+    // so up and down read as light and shade instead of green and red
     static let standard = Theme(
-        name: "Default",
+        name: "Atelier",
         appearance: .dark,
         font: Font(family: "system-mono", size: 12),
         colors: Colors(
-            background: ThemeColor(hex: "#0E1116"),
-            panel: ThemeColor(hex: "#141922"),
-            border: ThemeColor(hex: "#232A36"),
-            text: ThemeColor(hex: "#D7DDE6"),
-            muted: ThemeColor(hex: "#7D8796"),
-            accent: ThemeColor(hex: "#3BCA6D"),
-            buy: ThemeColor(hex: "#3BCA6D"),
-            sell: ThemeColor(hex: "#EB1E2F"),
-            // the chart colors are aggr's defaultIndicators.json
-            candleUp: ThemeColor(hex: "#3BCA6D"),
-            candleDown: ThemeColor(hex: "#D62828"),
-            candleUpBorder: ThemeColor(hex: "#3BCA6D"),
-            candleDownBorder: ThemeColor(hex: "#EF4352"),
-            wickUp: ThemeColor(hex: "#DFD390"),
-            wickDown: ThemeColor(hex: "#EF4352"),
-            volumeUp: ThemeColor(hex: "#3BCA6D80"),
-            volumeDown: ThemeColor(hex: "#EB1E2F80"),
-            deltaUp: ThemeColor(hex: "#3BCA6D"),
-            deltaDown: ThemeColor(hex: "#EB1E2F"),
-            liquidationBuy: ThemeColor(hex: "#FF4CF3"),
-            liquidationSell: ThemeColor(hex: "#FFB74D"),
-            cvd: ThemeColor(hex: "#3BCA6D"),
-            grid: ThemeColor(hex: "#FFFFFF0D"),
-            crosshair: ThemeColor(hex: "#FFFFFF4D"),
-            priceTagText: ThemeColor(hex: "#FFFFFF"),
-            domBuyBar: ThemeColor(hex: "#3BCA6D59"),
-            domSellBar: ThemeColor(hex: "#EB1E2F59"),
-            domCurrentRow: ThemeColor(hex: "#FFFFFF14"),
-            statusLive: ThemeColor(hex: "#3BCA6D"),
-            statusPending: ThemeColor(hex: "#FFB74D"),
-            statusDown: ThemeColor(hex: "#EB1E2F")
+            background: ThemeColor(hex: "#0E0D0C"),
+            panel: ThemeColor(hex: "#161513"),
+            border: ThemeColor(hex: "#2A2724"),
+            text: ThemeColor(hex: "#EAE4D9"),
+            muted: ThemeColor(hex: "#8C857A"),
+            accent: ThemeColor(hex: "#C2A878"),
+            buy: ThemeColor(hex: "#EDE6D8"),
+            sell: ThemeColor(hex: "#8C857A"),
+            candleUp: ThemeColor(hex: "#EDE6D8"),
+            candleDown: ThemeColor(hex: "#7A746B"),
+            candleUpBorder: ThemeColor(hex: "#EDE6D8"),
+            candleDownBorder: ThemeColor(hex: "#918A7F"),
+            wickUp: ThemeColor(hex: "#EDE6D8"),
+            wickDown: ThemeColor(hex: "#918A7F"),
+            volumeUp: ThemeColor(hex: "#EDE6D84D"),
+            volumeDown: ThemeColor(hex: "#7A746B80"),
+            deltaUp: ThemeColor(hex: "#EDE6D8"),
+            deltaDown: ThemeColor(hex: "#7A746B"),
+            liquidationBuy: ThemeColor(hex: "#B9765A"),
+            liquidationSell: ThemeColor(hex: "#C2A878"),
+            cvd: ThemeColor(hex: "#C2A878"),
+            grid: ThemeColor(hex: "#EAE4D90A"),
+            crosshair: ThemeColor(hex: "#EAE4D959"),
+            priceTagText: ThemeColor(hex: "#0E0D0C"),
+            domBuyBar: ThemeColor(hex: "#EDE6D866"),
+            domSellBar: ThemeColor(hex: "#6B655B40"),
+            domCurrentRow: ThemeColor(hex: "#C2A8781F"),
+            statusLive: ThemeColor(hex: "#EDE6D8"),
+            statusPending: ThemeColor(hex: "#C2A878"),
+            statusDown: ThemeColor(hex: "#B9765A")
         ),
         show: Show(
             header: true, tabs: true, headerPrice: true, headerSubtitle: true, marketsBar: true,
@@ -210,6 +211,16 @@ struct Theme: Codable, Equatable {
         return font.family == "system-mono"
             ? .system(size: size, weight: weight, design: .monospaced)
             : .custom(font.family, fixedSize: size).weight(weight)
+    }
+
+    // the letter-spaced labels on the chrome (indicator, dom, time, size): set in caps with .tracking
+    func caps(_ offset: Double = -3, weight: SwiftUI.Font.Weight = .medium) -> SwiftUI.Font {
+        .system(size: font.size + offset, weight: weight)
+    }
+
+    // running text, the (?) cards: numbers stay mono, sentences read better proportional
+    func prose(_ offset: Double = 0, weight: SwiftUI.Font.Weight = .regular) -> SwiftUI.Font {
+        .system(size: font.size + offset, weight: weight)
     }
 }
 
@@ -324,8 +335,10 @@ final class ThemeStore {
         // before built-ins existed, an imported file was always the active theme
         UserDefaults.standard.register(defaults: [Self.choiceKey: imported == nil ? Theme.standard.name : Self.custom])
         let saved = UserDefaults.standard.string(forKey: Self.choiceKey)!
-        if choices.contains(saved) {
-            choose(saved)
+        // the default used to be called "Default" and atelier was its own built-in, both are atelier now
+        let renamed = saved == "Default" ? Theme.standard.name : saved
+        if choices.contains(renamed) {
+            choose(renamed)
         } else if error == nil {
             error = "Theme \"\(saved)\" no longer exists, using the default."
         }

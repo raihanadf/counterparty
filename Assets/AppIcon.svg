@@ -1,35 +1,53 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024" fill="none">
   <title>Counterparty</title>
-  <desc>Sell volume reaches in from the left and buy volume from the right; both stop at the same price column.</desc>
+  <desc>The counterparty: a quiet man in profile under a long-brimmed fedora, backlit by a bone lamp on warm graphite.</desc>
   <defs>
-    <linearGradient id="surface" x1="512" y1="100" x2="512" y2="924" gradientUnits="userSpaceOnUse">
-      <stop stop-color="#1C2430"/>
-      <stop offset="1" stop-color="#0E1116"/>
+    <linearGradient id="surface" x1="260" y1="100" x2="764" y2="924" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#161513"/>
+      <stop offset="1" stop-color="#0E0D0C"/>
     </linearGradient>
     <linearGradient id="edge" x1="512" y1="100" x2="512" y2="924" gradientUnits="userSpaceOnUse">
-      <stop stop-color="#526071" stop-opacity="0.55"/>
-      <stop offset="1" stop-color="#526071" stop-opacity="0.12"/>
+      <stop stop-color="#C2A878" stop-opacity="0.22"/>
+      <stop offset="0.5" stop-color="#2A2724" stop-opacity="0.5"/>
+      <stop offset="1" stop-color="#2A2724" stop-opacity="0.2"/>
     </linearGradient>
-    <filter id="shadow" x="36" y="48" width="952" height="964" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
-      <feGaussianBlur stdDeviation="18"/>
+    <linearGradient id="lamp" x1="760" y1="200" x2="380" y2="720" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#EDE6D8"/>
+      <stop offset="1" stop-color="#EAE4D9" stop-opacity="0.86"/>
+    </linearGradient>
+    <linearGradient id="rimfade" x1="330" y1="610" x2="240" y2="860" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#C2A878" stop-opacity="0.9"/>
+      <stop offset="1" stop-color="#C2A878" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="brimlight" x1="262" y1="362" x2="336" y2="378" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#EAE4D9" stop-opacity="0.9"/>
+      <stop offset="1" stop-color="#EAE4D9" stop-opacity="0"/>
+    </linearGradient>
+    <clipPath id="body">
+      <rect x="100" y="100" width="824" height="824" rx="185"/>
+    </clipPath>
+    <filter id="shadow" x="34" y="52" width="956" height="954" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+      <feGaussianBlur stdDeviation="17"/>
     </filter>
   </defs>
-  <!-- The 824 px body leaves Apple's 100 px transparent icon margin. -->
-  <rect x="100" y="120" width="824" height="824" rx="185" fill="#000000" fill-opacity="0.28" filter="url(#shadow)"/>
+  <!-- 824 px body inside apple's 100 px transparent margin -->
+  <rect x="100" y="118" width="824" height="824" rx="185" fill="#000000" fill-opacity="0.34" filter="url(#shadow)"/>
   <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#surface)"/>
+  <g clip-path="url(#body)">
+    <!-- the lamp behind him, cut by hand so it is never quite round -->
+    <path d="M568 177 C723 178 846 299 845 452 C844 608 718 737 563 737 C409 736 286 612 287 459 C288 303 413 176 568 177 Z" fill="url(#lamp)"/>
+    <!-- head, turned-up trench collar and coat as one cut-paper silhouette -->
+    <path d="M392 404 C380 436 384 474 404 500 L430 538 L384 504 C378 534 372 566 362 598 C332 610 300 626 276 650 C254 676 244 720 238 790 L234 960 L686 960 L680 820 C676 760 664 714 640 684 L622 650 L600 640 L608 600 L580 592 C574 588 572 582 572 576 C586 572 606 568 618 562 C628 557 632 546 627 537 C624 532 624 528 628 524 L625 520 L630 515 C630 508 628 504 630 500 C638 498 648 496 652 491 C655 487 654 482 650 478 L624 446 C620 441 620 437 622 432 L618 410 L610 404 Z" fill="#0E0D0C"/>
+    <!-- light catching the back shoulder the lamp cannot reach -->
+    <path d="M362 599 C332 611 300 627 276 651 C254 677 244 721 238 791" stroke="url(#rimfade)" stroke-width="3" stroke-linecap="round"/>
+    <!-- tailoring: lapel roll and the front of the sleeve -->
+    <path d="M600 641 C590 680 576 730 570 800 C566 850 566 900 568 960" stroke="#2A2724" stroke-width="4" stroke-linecap="round"/>
+    <path d="M398 612 C436 640 462 700 472 780 C478 840 480 900 480 960" stroke="#2A2724" stroke-width="4" stroke-linecap="round"/>
+  </g>
+  <!-- fedora: pinched crown, brass band, long snap brim pulled over the eyes -->
+  <path d="M354 384 C356 342 362 302 374 274 C382 256 398 248 420 249 C446 252 458 264 476 264 C494 264 510 254 530 254 C552 255 566 266 578 290 C590 316 598 348 604 386 Z" fill="#0E0D0C"/>
+  <path d="M358 352 C440 358 520 358 599 350 L604 386 C520 393 440 393 354 384 Z" fill="#C2A878"/>
+  <path d="M262 361 C296 371 334 377 372 380 C450 386 540 386 606 382 C652 384 694 395 728 411 C736 415 735 424 726 426 C690 433 640 431 600 428 C520 424 430 420 360 412 C312 405 280 395 264 384 C254 377 252 365 262 361 Z" fill="#0E0D0C"/>
+  <path d="M263 362 C290 370 314 375 338 379 L336 383 C312 380 288 375 264 367 Z" fill="url(#brimlight)"/>
   <rect x="101" y="101" width="822" height="822" rx="184" stroke="url(#edge)" stroke-width="2"/>
-  <!-- Sell pressure peaks above the buy peak: every executed level has a party on each side of the price. -->
-  <g fill="#EB1E2F">
-    <path d="M318 250H484V354H318A14 14 0 0 1 304 340V264A14 14 0 0 1 318 250Z"/>
-    <path d="M230 390H484V494H230A14 14 0 0 1 216 480V404A14 14 0 0 1 230 390Z"/>
-    <path d="M358 530H484V634H358A14 14 0 0 1 344 620V544A14 14 0 0 1 358 530Z"/>
-    <path d="M286 670H484V774H286A14 14 0 0 1 272 760V684A14 14 0 0 1 286 670Z"/>
-  </g>
-  <g fill="#3BCA6D">
-    <path d="M540 250H658A14 14 0 0 1 672 264V340A14 14 0 0 1 658 354H540Z"/>
-    <path d="M540 390H730A14 14 0 0 1 744 404V480A14 14 0 0 1 730 494H540Z"/>
-    <path d="M540 530H794A14 14 0 0 1 808 544V620A14 14 0 0 1 794 634H540Z"/>
-    <path d="M540 670H706A14 14 0 0 1 720 684V760A14 14 0 0 1 706 774H540Z"/>
-  </g>
-  <rect x="496" y="210" width="32" height="604" rx="16" fill="#E8EDF3"/>
 </svg>

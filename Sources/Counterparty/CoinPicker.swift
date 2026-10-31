@@ -50,11 +50,11 @@ struct CoinPicker: View {
     var body: some View {
         let matches = matches(in: filter)
         VStack(spacing: 0) {
-            HStack(spacing: 8) {
-                Image(systemName: "magnifyingglass").foregroundStyle(theme.colors.muted.color)
+            HStack(spacing: 12) {
+                Image(systemName: "magnifyingglass").font(.system(size: 14, weight: .light)).foregroundStyle(theme.colors.muted.color)
                 TextField(mode == .newTab ? "Open a coin in a new tab" : "Search coins, e.g. ETH, SOL, PEPE", text: $query)
                     .textFieldStyle(.plain)
-                    .font(theme.mono(2))
+                    .font(theme.mono(4))
                     .focused($searching)
                     .onSubmit {
                         guard matches.indices.contains(highlight) else { return }
@@ -74,7 +74,9 @@ struct CoinPicker: View {
                         return .handled
                     }
             }
-            .padding(12)
+            .padding(.horizontal, 20)
+            .padding(.top, 20)
+            .padding(.bottom, 12)
 
             tabs
             theme.colors.border.color.frame(height: 1)
@@ -90,17 +92,32 @@ struct CoinPicker: View {
             }
 
             theme.colors.border.color.frame(height: 1)
-            HStack {
-                Text("↑↓ move · ⏎ open · ⌘⏎ new tab · ⇥ next tab")
-                    .foregroundStyle(theme.colors.muted.color)
+            HStack(spacing: 16) {
+                ForEach([("↑↓", "move"), ("⏎", "open"), ("⌘⏎", "new tab"), ("⇥", "next tab")], id: \.0) { key, action in
+                    HStack(spacing: 6) {
+                        Text(key).font(theme.mono(-2)).foregroundStyle(theme.colors.text.color)
+                        CapsLabel(action, theme: theme)
+                    }
+                }
                 Spacer()
-                Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
+                Button {
+                    dismiss()
+                } label: {
+                    CapsLabel("Cancel", theme: theme, color: theme.colors.text)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 5)
+                        .overlay(RoundedRectangle(cornerRadius: 2).strokeBorder(theme.colors.border.color))
+                        .contentShape(.rect)
+                }
+                .buttonStyle(.plain)
+                .keyboardShortcut(.cancelAction)
             }
-            .font(.caption)
-            .padding(10)
+            .padding(.horizontal, 20)
+            .padding(.vertical, 12)
         }
         .frame(width: 700, height: 560)
         .background(theme.colors.panel.color)
+        .tint(theme.colors.accent.color)
         .onAppear { searching = true }
         .onChange(of: query) { highlight = 0 }
         .onChange(of: filter) { highlight = 0 }
@@ -108,28 +125,18 @@ struct CoinPicker: View {
 
     private var tabs: some View {
         ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 4) {
-                ForEach(filters, id: \.self) { item in
-                    let count = matches(in: item).count
-                    Button {
-                        filter = item
-                    } label: {
-                        HStack(spacing: 5) {
-                            Text(title(item))
-                            Text("\(count)").foregroundStyle(theme.colors.muted.color)
-                        }
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 4)
-                        .background(filter == item ? theme.colors.border.color : .clear, in: .capsule)
-                    }
-                    .buttonStyle(.plain)
-                    .foregroundStyle((filter == item ? theme.colors.text : theme.colors.muted).color)
+            // group names keep their own case (ETFs, not ETFS), only the chrome's labels are set in caps
+            RuleSegments(items: filters, selection: $filter, theme: theme) { item, chosen in
+                HStack(spacing: 6) {
+                    Text(title(item)).font(theme.prose(-1, weight: chosen ? .semibold : .medium))
+                    Text("\(matches(in: item).count)")
+                        .font(theme.mono(-2))
+                        .foregroundStyle((chosen ? theme.colors.accent : theme.colors.muted).color)
                 }
             }
-            .padding(.horizontal, 10)
-            .padding(.bottom, 8)
+            .padding(.horizontal, 12)
+            .padding(.bottom, 4)
         }
-        .font(.callout)
     }
 
     private func list(_ matches: [Coin]) -> some View {
@@ -142,7 +149,8 @@ struct CoinPicker: View {
                         .onTapGesture {
                             pick(coin.symbol, newTab: mode == .newTab || NSEvent.modifierFlags.contains(.command))
                         }
-                        .listRowBackground(index == highlight ? theme.colors.accent.color.opacity(0.18) : .clear)
+                        .listRowBackground(highlightBackground(index == highlight))
+                        .listRowSeparator(.hidden)
                 }
             }
             .listStyle(.plain)
@@ -153,24 +161,35 @@ struct CoinPicker: View {
         }
     }
 
+    // the highlighted row: a brass wash with a brass rule on its left edge
+    @ViewBuilder
+    private func highlightBackground(_ on: Bool) -> some View {
+        if on {
+            theme.colors.accent.color.opacity(0.1)
+                .overlay(alignment: .leading) { theme.colors.accent.color.frame(width: 2) }
+        } else {
+            Color.clear
+        }
+    }
+
     private func row(_ coin: Coin, highlighted: Bool) -> some View {
         let open = workspace.tabs.contains { $0.coin == coin.symbol }
-        return HStack(spacing: 8) {
-            Text(coin.symbol).font(theme.mono(1, weight: open ? .bold : .regular))
+        return HStack(spacing: 10) {
+            Text(coin.symbol).font(theme.mono(1, weight: open ? .bold : .medium)).tracking(0.4)
             if coin.kind != .crypto && filter != .kind(coin.kind) {
-                Text(coin.kind.title)
-                    .font(.caption2)
+                Text(coin.kind.title).font(theme.prose(-3, weight: .medium)).foregroundStyle(theme.colors.muted.color)
                     .padding(.horizontal, 5)
-                    .padding(.vertical, 1)
-                    .background(theme.colors.border.color, in: .capsule)
+                    .padding(.vertical, 2)
+                    .overlay(RoundedRectangle(cornerRadius: 2).strokeBorder(theme.colors.border.color))
             }
             if open {
                 Image(systemName: "circle.fill").font(.system(size: 5)).foregroundStyle(theme.colors.accent.color).help("open in a tab")
             }
             Spacer()
-            Text(summary(coin)).foregroundStyle(theme.colors.muted.color).lineLimit(1)
-            Text("\(coin.markets.count)").font(theme.mono()).frame(width: 24, alignment: .trailing)
+            Text(summary(coin)).font(theme.mono(-2)).foregroundStyle(theme.colors.muted.color).lineLimit(1)
+            Text("\(coin.markets.count)").font(theme.mono(-1)).foregroundStyle((highlighted ? theme.colors.accent : theme.colors.text).color).frame(width: 24, alignment: .trailing)
         }
+        .padding(.vertical, 3)
         .foregroundStyle(theme.colors.text.color)
     }
 
