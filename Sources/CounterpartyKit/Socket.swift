@@ -70,6 +70,9 @@ private func open(_ connection: NWConnection) async throws {
                 connection.stateUpdateHandler = nil
                 connection.cancel()
                 continuation.resume(throwing: error)
+            case .cancelled:
+                connection.stateUpdateHandler = nil
+                continuation.resume(throwing: CancellationError())
             default:
                 break
             }
@@ -78,32 +81,48 @@ private func open(_ connection: NWConnection) async throws {
     }
 }
 
-// a plain https get for endpoints the system resolver can't reach and aggr's proxy doesn't carry
-// (bybit pages its product list, the proxy only knows the first page)
-func httpGet(_ url: URL) async throws -> Data {
+// a plain https get through the same dns-over-https route as the sockets, since several exchanges'
+// rest hosts are dns-blocked too. gives up after `deadline` instead of hanging on a stalled server
+func httpGet(_ url: URL, deadline: Duration = .seconds(20)) async throws -> Data {
     let (address, parameters) = try await route(url)
     let connection = NWConnection(host: NWEndpoint.Host(address.host!), port: 443, using: parameters)
-    try await open(connection)
-    defer { connection.cancel() }
-
-    let path = url.path + (url.query.map { "?" + $0 } ?? "")
-    let request = "GET \(path) HTTP/1.1\r\nHost: \(url.host!)\r\nAccept: application/json\r\nAccept-Encoding: identity\r\nConnection: close\r\n\r\n"
-    try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-        connection.send(content: Data(request.utf8), completion: .contentProcessed { error in
-            if let error { continuation.resume(throwing: error) } else { continuation.resume() }
-        })
+    // cancelling the connection wakes up whichever wait below is pending, with an error
+    let started = ContinuousClock.now
+    let watchdog = Task {
+        try await Task.sleep(for: deadline)
+        connection.cancel()
+    }
+    defer {
+        watchdog.cancel()
+        connection.cancel()
     }
 
-    // connection: close, so the response ends when the server hangs up
     var response = Data()
-    while true {
-        let (chunk, done) = try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<(Data?, Bool), Error>) in
-            connection.receive(minimumIncompleteLength: 1, maximumLength: 1 << 20) { data, _, complete, error in
-                if let error { continuation.resume(throwing: error) } else { continuation.resume(returning: (data, complete)) }
-            }
+    do {
+        try await open(connection)
+        let path = url.path + (url.query.map { "?" + $0 } ?? "")
+        let request = "GET \(path) HTTP/1.1\r\nHost: \(url.host!)\r\nAccept: application/json\r\nAccept-Encoding: identity\r\nConnection: close\r\n\r\n"
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            connection.send(content: Data(request.utf8), completion: .contentProcessed { error in
+                if let error { continuation.resume(throwing: error) } else { continuation.resume() }
+            })
         }
-        if let chunk { response.append(chunk) }
-        if done { break }
+
+        // connection: close, so the response ends when the server hangs up
+        while true {
+            let (chunk, done) = try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<(Data?, Bool), Error>) in
+                connection.receive(minimumIncompleteLength: 1, maximumLength: 1 << 20) { data, _, complete, error in
+                    if let error { continuation.resume(throwing: error) } else { continuation.resume(returning: (data, complete)) }
+                }
+            }
+            if let chunk { response.append(chunk) }
+            if done { break }
+        }
+    } catch {
+        if ContinuousClock.now - started >= deadline {
+            throw SocketError(errorDescription: "\(url.host!) didn't answer within \(deadline)")
+        }
+        throw error
     }
 
     guard let split = response.firstRange(of: Data("\r\n\r\n".utf8)) else { throw SocketError(errorDescription: "\(url.host!) sent no http headers") }

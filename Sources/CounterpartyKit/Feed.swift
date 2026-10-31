@@ -9,12 +9,43 @@ public enum MarketStatus: Sendable, Equatable {
     case down(String)
 }
 
-public typealias TradeHandler = @MainActor @Sendable ([Trade]) -> Void
+// called on the socket's own task for every message that carried trades. it's not main-actor bound:
+// a busy coin sends hundreds of messages a second, hopping to the main thread for each one starved the ui
+public typealias TradeHandler = @Sendable ([Trade]) -> Void
 public typealias StatusHandler = @MainActor @Sendable ([String], MarketStatus) -> Void
+
+// the tabs of the coin search are bybit's own grouping of its perps (innovation, stock, etf, ...),
+// read from its product list so a new group shows up as a new tab
+public struct CoinKind: Sendable, Hashable, Comparable {
+    public let tag: String
+
+    public static let crypto = CoinKind(tag: "crypto")
+
+    public var title: String {
+        switch tag {
+        case "crypto": "Crypto"
+        case "innovation": "Innovation"
+        case "stock": "Stocks"
+        case "etf": "ETFs"
+        case "commodity": "Commodities"
+        default: tag.capitalized
+        }
+    }
+
+    // crypto first, then bybit's groups in the order its app shows them, new ones last
+    private var order: Int {
+        ["crypto", "innovation", "stock", "etf", "commodity", "forex"].firstIndex(of: tag) ?? 99
+    }
+
+    public static func < (left: CoinKind, right: CoinKind) -> Bool {
+        (left.order, left.tag) < (right.order, right.tag)
+    }
+}
 
 public struct Coin: Sendable, Identifiable, Hashable {
     public let symbol: String
     public let markets: [String]
+    public let kind: CoinKind
     public var id: String { symbol }
 }
 
@@ -34,9 +65,15 @@ public struct Catalogs: Sendable {
             }
         }
         return symbols
-            .map { Coin(symbol: $0, markets: markets(for: $0)) }
+            .map { Coin(symbol: $0, markets: markets(for: $0), kind: kind(of: $0)) }
             .filter { !$0.markets.isEmpty }
             .sorted { ($0.markets.count, $1.symbol) > ($1.markets.count, $0.symbol) }
+    }
+
+    // bybit tags its usdt perps, a coin bybit doesn't list (or doesn't tag) is plain crypto
+    func kind(of coin: String) -> CoinKind {
+        guard let tag = byExchange["BYBIT"]?.kinds["\(coin)USDT"] else { return .crypto }
+        return CoinKind(tag: tag.lowercased())
     }
 
     // every usd/usdt/usdc perp of the coin on every exchange that lists it. for btc that's aggr's default perps
@@ -134,7 +171,7 @@ private func runSocket(_ exchange: any Exchange, catalog: Catalog, url: URL, pai
                     let data = try await socket.receive()
                     attempt = 0
                     let trades = exchange.parse(data, catalog: catalog, state: &state)
-                    if !trades.isEmpty { await onTrades(trades) }
+                    if !trades.isEmpty { onTrades(trades) }
                 }
             } onCancel: {
                 socket.close()

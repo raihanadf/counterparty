@@ -42,8 +42,13 @@ final class IndicatorModel {
     // set when aggr keeps no history for any market of the coin
     private(set) var notice: String?
     private(set) var loading = false
+    // true once the first history load finished, the dom waits for it so both views start together
+    private(set) var ready = false
+    // decimals the coin's prices are shown with, known from the first price seen
+    private(set) var decimals: Int?
 
-    @ObservationIgnored private var timeframe = 60
+    // the timeframe the bars are in, nil before the first load
+    @ObservationIgnored private(set) var timeframe: Int?
     @ObservationIgnored private var buckets: [Int: [String: SourceBar]] = [:]
     // every bar before the live one, already computed
     @ObservationIgnored private var closed: [Point] = []
@@ -57,6 +62,11 @@ final class IndicatorModel {
     var points: [Point] {
         guard let bucket = buckets[latest] else { return closed }
         return closed + [compute(latest, bucket, base).point]
+    }
+
+    // the last closed bar's close, what a tab compares its live price against
+    var previousClose: Double? {
+        closed.last?.candle?.close
     }
 
     // aggr's server only answers for markets it records, the rest of a coin's markets start from live trades
@@ -103,17 +113,24 @@ final class IndicatorModel {
             latest = times.last ?? 0
             let cutoff = to.timeIntervalSince1970 * 1000
             loading = false
+            ready = true
+            if decimals == nil, let close = closed.last?.candle?.close { decimals = Counterparty.decimals(forPrice: close) }
             add(buffered.filter { $0.timestamp >= cutoff })
             buffered = []
         } catch {
             guard token == self.token else { return }
             self.error = "history failed: \(error.localizedDescription)"
             loading = false
+            ready = true
         }
     }
 
     func add(_ trades: [Trade]) {
-        if loading {
+        if decimals == nil, let first = trades.first(where: { !$0.liquidation }) {
+            decimals = Counterparty.decimals(forPrice: first.price)
+        }
+        // before the first load there's no timeframe, the load's buffer takes these
+        guard !loading, let timeframe else {
             buffered += trades
             return
         }
@@ -194,7 +211,6 @@ final class IndicatorModel {
     }
 }
 
-
 // 1, 2 or 5 times a power of ten, so axis labels land on round prices
 func niceStep(_ raw: Double) -> Double {
     let power = pow(10, floor(log10(max(raw, 1e-12))))
@@ -202,17 +218,14 @@ func niceStep(_ raw: Double) -> Double {
     return (fraction <= 1 ? 1 : fraction <= 2 ? 2 : fraction <= 5 ? 5 : 10) * power
 }
 
-// decimals for the selected coin: about 6 significant digits, so btc shows 1 and a meme coin enough to move.
-// one coin is shown at a time and the store sets this when the coin's price is known, so a global is enough
-nonisolated(unsafe) var priceDecimals = 1
-
+// about 6 significant digits, so btc shows 1 decimal and a meme coin enough to move
 func decimals(forPrice price: Double) -> Int {
     min(12, max(0, 5 - Int(floor(log10(price)))))
 }
 
 // fixed english formatting, a locale with comma decimals would make 81.230 read like a decimal
-func price(_ value: Double) -> String {
-    String(format: "%.\(priceDecimals)f", value)
+func price(_ value: Double, decimals: Int) -> String {
+    String(format: "%.\(decimals)f", value)
 }
 
 func usd(_ value: Double) -> String {

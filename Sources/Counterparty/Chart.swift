@@ -55,8 +55,11 @@ private struct ChartFrame {
         } else {
             let candles = points[visible].compactMap(\.candle)
             if let low = candles.map(\.low).min(), let high = candles.map(\.high).max() {
-                // a flat range would divide by zero
-                range = low < high ? low...high : (low - 1)...(high + 1)
+                // at least 0.2% of the price tall, so a few quiet bars (or one) don't blow up into noise,
+                // plus 4% room above and below so wicks don't touch the edges
+                let middle = (low + high) / 2
+                let span = max(high - low, middle * 0.002) * 1.08
+                range = (middle - span / 2)...(middle + span / 2)
             } else {
                 range = nil
             }
@@ -109,30 +112,35 @@ struct IndicatorView: View {
     @State private var viewport = Viewport()
     @State private var drag: DragState?
     @State private var hover: CGPoint?
+    @Environment(HelpMode.self) private var help
 
     // hidden axes give their space back to the chart. labels are 7 characters for prices of 1 and up
     // (80000.0, 99.7680), and "0." plus the decimals below that, so the axis grows for small coins
     private var axisWidth: Double {
         guard theme.show.priceAxis else { return 0 }
-        let characters = max(7, priceDecimals + 2)
+        let characters = max(7, (model.decimals ?? 0) + 2)
         return max(70, Double(characters) * (theme.font.size - 2) * 0.62 + 16)
     }
     private var axisHeight: Double { theme.show.timeAxis ? 20 : 0 }
 
     var body: some View {
         GeometryReader { geometry in
-            TimelineView(.periodic(from: .now, by: 0.25)) { _ in
+            TimelineView(.periodic(from: .now, by: 0.1)) { _ in
                 let points = model.points
                 let frame = frame(points, geometry.size)
                 Canvas { context, _ in
                     draw(points, frame, in: &context)
                 }
+                .explain { point, _ in explanation(at: point, frame) }
                 .overlay(alignment: .topLeading) {
                     if theme.show.legend { legend(points, frame) }
                 }
                 .overlay {
-                    ChartInputView(axisX: frame.width, axisY: frame.height) { input in
-                        handle(input, points: points, size: geometry.size)
+                    // the (?) mode reads the areas under it, gestures wait until it's off
+                    if !help.on {
+                        ChartInputView(axisX: frame.width, axisY: frame.height) { input in
+                            handle(input, points: points, size: geometry.size)
+                        }
                     }
                 }
                 // after the input view so the buttons get their clicks
@@ -153,6 +161,8 @@ struct IndicatorView: View {
                     .allowsHitTesting(false)
             }
         }
+        // the crosshair stays where the gestures left it otherwise
+        .onChange(of: help.on) { hover = nil }
     }
 
     private func frame(_ points: [Point], _ size: CGSize) -> ChartFrame {
@@ -267,21 +277,78 @@ struct IndicatorView: View {
 
     // MARK: overlays
 
+    // the (?) text for the area under the cursor, in the same bands draw(_:_:in:) uses
+    private func explanation(at point: CGPoint, _ frame: ChartFrame) -> Hint? {
+        let show = theme.show
+        if point.y > frame.height {
+            return show.timeAxis ? Hint(
+                "Time of each bar, on your clock. Pinch or two-finger swipe up and down to zoom, swipe sideways or drag the chart to go back in time.",
+                example: "Zoom out to a few hours on 5m to see where price keeps turning; zoom in on 5s to see how it behaves when it gets there. Reading one without the other is how setups get misread."
+            ) : nil
+        }
+        if point.x > frame.width {
+            return show.priceAxis ? Hint(
+                "Price scale, and the tag of the last close. Drag it to stretch or squeeze prices (that turns auto-scale off); double-click it to fit again.",
+                example: "Squeezed too much, a 0.1% wiggle looks like a crash. If a move looks huge, check the labels: 77,000 to 77,200 is only 0.26%."
+            ) : nil
+        }
+        let y = point.y / frame.height
+        if y < 0.75 {
+            return Hint(
+                "Candles: each bar's open, high, low and close, averaged over every perp of the coin like aggr.trade. Up candles closed above their open, down candles below it. Drag or swipe to scroll, pinch to zoom, double-click to come back to now.",
+                example: "Strong: candles closing near their high, one after another, with volume growing. Rejected: a long wick above the body at an old high, with big sells on the tape. Buyers tried and failed, the close tells who won."
+            )
+        }
+        if y < 0.84 {
+            return show.liquidations ? Hint(
+                "Liquidations: positions the exchanges force-closed, in dollars. Bars up are shorts forced to buy, which pushes price up; bars down are longs forced to sell. A cluster of them is often where a move runs out or speeds up.",
+                example: "Exhaustion (often good for a reversal): one huge bar down at a low, then the next candles stop falling. The forced sellers are gone. Cascade (bad to fade): down bars growing bar after bar while price keeps dropping, each liquidation pushes price into the next ones."
+            ) : nil
+        }
+        var parts: [String] = []
+        if show.volume { parts.append("Volume bars: dollars traded per bar, coloured by whether market buys or sells were bigger.") }
+        if show.delta { parts.append("The inner bar is delta, buys minus sells, how lopsided the aggression was.") }
+        if show.cvd { parts.append("The line is CVD, delta added up since the left edge: rising means buyers keep pressing.") }
+        return parts.isEmpty ? nil : Hint(
+            parts.joined(separator: " "),
+            example: "Healthy: price makes a new high and CVD makes a new high too, real buyers are behind it. Warning: price makes a new high but CVD is lower than at the last high (a divergence), the move is running on fewer buyers. Absorption: CVD climbing while price stays flat, someone's limit sells are soaking up the buying."
+        )
+    }
+
     private func legend(_ points: [Point], _ frame: ChartFrame) -> some View {
         let index = hover.flatMap { $0.x < frame.width ? frame.index(at: $0.x) : nil } ?? points.indices.last
         return VStack(alignment: .leading, spacing: 2) {
-            if let index, let candle = points[index].candle {
+            if let index, let candle = points[index].candle, let decimals = model.decimals {
                 let point = points[index]
-                Text("\(timeLabel(point.time))  O \(price(candle.open))  H \(price(candle.high))  L \(price(candle.low))  C \(price(candle.close))")
+                let format = { (value: Double) in price(value, decimals: decimals) }
+                let volume = point.vbuy + point.vsell
+                let delta = point.vbuy - point.vsell
+                let share = volume > 0 ? Int((abs(delta) / volume * 100).rounded()) : 0
+                let upperWick = candle.high - max(candle.open, candle.close)
+                let lowerWick = min(candle.open, candle.close) - candle.low
+                let body = abs(candle.close - candle.open)
+                Text("\(timeLabel(point.time))  O \(format(candle.open))  H \(format(candle.high))  L \(format(candle.low))  C \(format(candle.close))")
                     .foregroundStyle((candle.close >= candle.open ? theme.colors.candleUp : theme.colors.candleDownBorder).color)
-                Text("Vol \(usd(point.vbuy + point.vsell))  Δ \(usd(point.vbuy - point.vsell))  CVD \(usd(point.cvd))")
+                    .explain(Hint(
+                        "The hovered bar, or the newest one: its start time, then Open, High, Low and Close. Each is the average of every perp of the coin, the way aggr builds its chart, so it won't match one exchange to the cent. This bar moved \(format(candle.close - candle.open)), with an upper wick of \(format(upperWick)) and a lower wick of \(format(lowerWick)).",
+                        example: "Good for buyers: close near the high (small upper wick) after a long lower wick, sellers pushed down and got bought back. Bad for buyers: a big upper wick, bigger than the body, like \(upperWick > body ? "this bar's \(format(upperWick)) against a \(format(body)) body" : "a 50 wick on a 10 body"). Price went up and was sold back down."
+                    ))
+                Text("Vol \(usd(volume))  Δ \(usd(delta))  CVD \(usd(point.cvd))")
                     .foregroundStyle(theme.colors.text.color)
+                    .explain(Hint(
+                        "Vol: dollars traded in the bar, all perps together. Δ (delta): market buys minus market sells, positive means aggressive buyers outweighed sellers. Here delta is \(share)% of the volume, net \(delta >= 0 ? "buying" : "selling"). CVD: the deltas added up since the left edge of the loaded history, so its direction matters, not its level.",
+                        example: "Strong: delta over about 20% of the volume and price moving the same way, the aggressors are winning. Absorption: a big delta but price barely moved, like heavy buying into a flat candle. Limit sellers are taking all of it, and that often turns. Balanced: delta under 5%, a fight with no winner yet."
+                    ))
                 Text("Liq ↑\(usd(point.lbuy)) ↓\(usd(point.lsell))").foregroundStyle(theme.colors.liquidationSell.color)
+                    .explain(Hint(
+                        "Liquidations in the bar, in dollars: positions the exchanges closed because their margin ran out. ↑ is shorts forced to buy, ↓ is longs forced to sell. Exchanges publish them throttled, so bursts are undercounted.",
+                        example: "Flush: ↓ in the millions on one bar at a low, and the next bars stop falling. Over-leveraged longs are out, a bounce gets easier. Squeeze: ↑ growing bar after bar while price climbs, shorts forced to buy are what drive the move."
+                    ))
             }
         }
         .font(theme.mono(-1))
         .padding(8)
-        .allowsHitTesting(false)
+        .allowsHitTesting(help.on)
     }
 
     // tradingview's corner buttons: auto-scale, and back to the newest bar when scrolled away
@@ -294,6 +361,7 @@ struct IndicatorView: View {
                     Image(systemName: "chevron.right.2")
                 }
                 .help("Scroll to the newest bar")
+                .explain(Hint("Back to the newest bar. It shows up once you've scrolled into the past.", example: "Scroll back to see how price reacted at a level last time, then click this to watch it come back to that level now."))
             }
             Button {
                 viewport.autoScale.toggle()
@@ -303,6 +371,10 @@ struct IndicatorView: View {
             }
             .foregroundStyle((viewport.autoScale ? theme.colors.accent : theme.colors.muted).color)
             .help(viewport.autoScale ? "Auto-scale is on, drag the price axis to scale by hand" : "Turn auto-scale back on")
+            .explain(Hint(
+                "Auto-scale: \(viewport.autoScale ? "on" : "off"). When on, prices fit the visible candles with a little room. Dragging the price axis turns it off; click to turn it back on.",
+                example: "Keep it on to follow the move. Turn it off (drag the price axis) to pin a range, say two levels you're watching, so the chart doesn't rescale every time a wick pokes out."
+            ))
         }
         .buttonStyle(.borderless)
         .font(theme.mono(-1))
@@ -387,8 +459,10 @@ struct IndicatorView: View {
             }, with: .color(colors.cvd.color), lineWidth: 1)
         }
 
-        guard let range = frame.range else { return }
+        // a candle means a price was seen, which is what sets the decimals
+        guard let range = frame.range, let decimals = model.decimals else { return }
         let y = { (price: Double) in frame.y(price, in: range) }
+        let format = { (value: Double) in price(value, decimals: decimals) }
 
         // price grid and axis labels, about one line every 60 points
         let step = niceStep((range.upperBound - range.lowerBound) / max(2, (frame.bandBottom - frame.bandTop) / 60))
@@ -398,7 +472,7 @@ struct IndicatorView: View {
                 plot.stroke(line(CGPoint(x: 0, y: y(level)), CGPoint(x: width, y: y(level))), with: .color(colors.grid.color))
             }
             if show.priceAxis && y(level) < height - 8 && y(level) > 8 {
-                context.draw(Text(price(level)).font(theme.mono(-2)).foregroundStyle(colors.muted.color), at: CGPoint(x: width + 6, y: y(level)), anchor: .leading)
+                context.draw(Text(format(level)).font(theme.mono(-2)).foregroundStyle(colors.muted.color), at: CGPoint(x: width + 6, y: y(level)), anchor: .leading)
             }
             level += step
         }
@@ -423,7 +497,7 @@ struct IndicatorView: View {
                 plot.stroke(line(CGPoint(x: 0, y: lastY), CGPoint(x: width, y: lastY)), with: .color(color.opacity(0.6)), style: StrokeStyle(lineWidth: 1, dash: [2, 3]))
             }
             if show.priceAxis && lastY > -8 && lastY < height + 8 {
-                tag(price(last.close), at: CGPoint(x: width + 2, y: lastY), fill: color, text: colors.priceTagText.color, in: &context)
+                tag(format(last.close), at: CGPoint(x: width + 2, y: lastY), fill: color, text: colors.priceTagText.color, in: &context)
             }
         }
 
@@ -446,7 +520,7 @@ struct IndicatorView: View {
             plot.stroke(line(CGPoint(x: x, y: 0), CGPoint(x: x, y: height)), with: .color(colors.crosshair.color), style: dash)
             plot.stroke(line(CGPoint(x: 0, y: hover.y), CGPoint(x: width, y: hover.y)), with: .color(colors.crosshair.color), style: dash)
             if show.priceAxis {
-                tag(price(frame.price(at: hover.y, in: range)), at: CGPoint(x: width + 2, y: hover.y), fill: colors.panel.color, text: colors.text.color, border: colors.border.color, in: &context)
+                tag(format(frame.price(at: hover.y, in: range)), at: CGPoint(x: width + 2, y: hover.y), fill: colors.panel.color, text: colors.text.color, border: colors.border.color, in: &context)
             }
             if show.timeAxis {
                 let label = Text(timeLabel(points[index].time)).font(theme.mono(-2)).foregroundStyle(colors.text.color)

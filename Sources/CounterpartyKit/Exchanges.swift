@@ -28,6 +28,8 @@ public struct Catalog: Sendable {
     var inverse: Set<String> = []
     // pairs that live on another socket than the exchange's default one
     var sockets: [String: String] = [:]
+    // bybit's own grouping of a pair (innovation, stock, etf, commodity, forex), crypto when missing
+    var kinds: [String: String] = [:]
 
     func toBase(_ pair: String, size: Double, price: Double) -> Double {
         size * (multiplier[pair] ?? 1) / (inverse.contains(pair) ? price : 1)
@@ -57,27 +59,20 @@ public protocol Exchange: Sendable {
     func parse(_ data: Data, catalog: Catalog, state: inout SocketState) -> [Trade]
 }
 
-// exchanges whose product lists come through aggr's cors proxy, like aggr does it
-protocol ProxiedExchange: Exchange {
-    // the proxy only accepts these exact urls
+// exchanges whose product lists are a few fixed rest urls. aggr reads the same urls through its cors proxy,
+// which a browser needs and a native app doesn't, so they're read straight from the exchange
+// (the proxy also stalls for 20s+ at times, which froze the app at launch)
+protocol RestExchange: Exchange {
     var productURLs: [String] { get }
     func catalog(from responses: [Data]) throws -> Catalog
 }
 
-private let proxy = "https://cors.aggr.trade/"
-
-extension ProxiedExchange {
+extension RestExchange {
     public func loadCatalog() async throws -> Catalog {
         // all of an exchange's lists at once, kept in productURLs order since catalog(from:) reads them by position
         let responses = try await withThrowingTaskGroup(of: (Int, Data).self) { group in
             for (index, url) in productURLs.enumerated() {
-                group.addTask {
-                    let (data, response) = try await URLSession.shared.data(from: URL(string: proxy + url)!)
-                    if let http = response as? HTTPURLResponse, http.statusCode != 200 {
-                        throw ProductError(errorDescription: "\(url) answered \(http.statusCode)")
-                    }
-                    return (index, data)
-                }
+                group.addTask { (index, try await httpGet(URL(string: url)!)) }
             }
             var byIndex: [Int: Data] = [:]
             for try await (index, data) in group { byIndex[index] = data }
@@ -148,7 +143,7 @@ private struct BinanceEvent: Decodable {
     let o: Order?
 }
 
-struct BinanceFutures: ProxiedExchange {
+struct BinanceFutures: RestExchange {
     let id = "BINANCE_FUTURES"
     let productURLs = ["https://fapi.binance.com/fapi/v1/exchangeInfo", "https://dapi.binance.com/dapi/v1/exchangeInfo"]
     let socketURL = "wss://fstream.binance.com/market/ws"
@@ -200,7 +195,7 @@ private struct BitfinexSubscribed: Decodable {
     let pair: String?
 }
 
-struct Bitfinex: ProxiedExchange {
+struct Bitfinex: RestExchange {
     let id = "BITFINEX"
     let productURLs = ["https://api.bitfinex.com/v1/symbols"]
     let socketURL = "wss://api-pub.bitfinex.com/ws/2/"
@@ -256,7 +251,12 @@ struct Bitfinex: ProxiedExchange {
 
 private struct BybitInstruments: Decodable {
     struct Result: Decodable {
-        struct Item: Decodable { let symbol: String }
+        struct Item: Decodable {
+            let symbol: String
+            let contractType: String
+            // empty for plain crypto, set on the linear list only
+            let symbolType: String?
+        }
         let list: [Item]
         let nextPageCursor: String?
     }
@@ -278,42 +278,44 @@ private struct BybitMessage: Decodable {
 struct Bybit: Exchange {
     let id = "BYBIT"
     let socketURL = "wss://stream.bybit.com/v5/public/inverse"
-    // usdt perps and inverse perps
-    let templates = ["{}USDT", "{}USD"]
+    // usdt perps, usdc perps (BTCPERP) and inverse perps
+    let templates = ["{}USDT", "{}PERP", "{}USD"]
     var ping: (message: String, every: Duration)? { (#"{"op":"ping"}"#, .seconds(20)) }
 
     // aggr's proxy only carries the first page of 500 linear pairs, so bybit is read directly, page by page
     func loadCatalog() async throws -> Catalog {
         // both categories at once, each one page by page
-        let lists = try await withThrowingTaskGroup(of: (String, [String]).self) { group in
+        let lists = try await withThrowingTaskGroup(of: (String, [BybitInstruments.Result.Item]).self) { group in
             for category in ["linear", "inverse"] {
                 group.addTask {
-                    var symbols: [String] = []
+                    var items: [BybitInstruments.Result.Item] = []
                     var cursor = ""
                     repeat {
                         var url = URLComponents(string: "https://api.bybit.com/v5/market/instruments-info")!
                         url.queryItems = [URLQueryItem(name: "category", value: category), URLQueryItem(name: "limit", value: "1000")]
                         if !cursor.isEmpty { url.queryItems?.append(URLQueryItem(name: "cursor", value: cursor)) }
                         let page = try require(BybitInstruments.self, try await httpGet(url.url!), id).result
-                        symbols += page.list.map(\.symbol)
+                        items += page.list
                         cursor = page.nextPageCursor ?? ""
                     } while !cursor.isEmpty
-                    return (category, symbols)
+                    return (category, items)
                 }
             }
-            var lists: [String: [String]] = [:]
-            for try await (category, symbols) in group { lists[category] = symbols }
+            var lists: [String: [BybitInstruments.Result.Item]] = [:]
+            for try await (category, items) in group { lists[category] = items }
             return lists
         }
 
         var catalog = Catalog()
-        for symbol in lists["linear"]! {
-            catalog.pairs.insert(symbol)
-            catalog.sockets[symbol] = "wss://stream.bybit.com/v5/public/linear"
+        // dated futures share the lists, only perpetuals are kept
+        for item in lists["linear"]! where item.contractType == "LinearPerpetual" {
+            catalog.pairs.insert(item.symbol)
+            catalog.sockets[item.symbol] = "wss://stream.bybit.com/v5/public/linear"
+            if let kind = item.symbolType, !kind.isEmpty { catalog.kinds[item.symbol] = kind }
         }
-        for symbol in lists["inverse"]! {
-            catalog.pairs.insert(symbol)
-            catalog.inverse.insert(symbol)
+        for item in lists["inverse"]! where item.contractType == "InversePerpetual" {
+            catalog.pairs.insert(item.symbol)
+            catalog.inverse.insert(item.symbol)
         }
         return catalog
     }
@@ -357,7 +359,7 @@ private struct DeribitMessage: Decodable {
     let params: Params
 }
 
-struct Deribit: ProxiedExchange {
+struct Deribit: RestExchange {
     let id = "DERIBIT"
     let productURLs = [
         "https://www.deribit.com/api/v2/public/get_instruments?currency=BTC&kind=future",
@@ -419,7 +421,7 @@ private struct OkxMessage: Decodable {
     let data: [Row]
 }
 
-struct Okx: ProxiedExchange {
+struct Okx: RestExchange {
     let id = "OKEX"
     let productURLs = ["https://www.okx.com/api/v5/public/instruments?instType=SWAP"]
     let socketURL = "wss://ws.okx.com:8443/ws/v5/public"

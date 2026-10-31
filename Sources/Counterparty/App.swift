@@ -2,99 +2,11 @@ import AppKit
 import CounterpartyKit
 import SwiftUI
 
-@MainActor @Observable
-final class MarketStore {
-    let indicator = IndicatorModel()
-    let dom = DomModel()
-    // nil until every exchange's product list is read
-    private(set) var catalogs: Catalogs?
-    private(set) var coins: [Coin] = []
-    private(set) var coin: String
-    private(set) var markets: [String] = []
-    private(set) var statuses: [String: MarketStatus] = [:]
-    var choosingCoin = false
-    // what the header and the market bar show, copied from the live values twice a second
-    private(set) var price: Double?
-    private(set) var tradeCounts: [String: Int] = [:]
-    // these change on every trade, observing them would redraw the window per trade
-    @ObservationIgnored private var counts: [String: Int] = [:]
-    @ObservationIgnored private var lastPrice: Double?
-    @ObservationIgnored private var feed: Task<Void, Never>?
-    // trades and statuses from the previous coin's sockets can still land after a switch
-    @ObservationIgnored private var generation = 0
-
-    init() {
-        UserDefaults.standard.register(defaults: [Keys.coin: "BTC"])
-        coin = UserDefaults.standard.string(forKey: Keys.coin)!
-    }
-
-    func start() async {
-        guard catalogs == nil else { return }
-        // the store lives as long as the app, so does this
-        Task {
-            while true {
-                if price != lastPrice { price = lastPrice }
-                if tradeCounts != counts { tradeCounts = counts }
-                try? await Task.sleep(for: .milliseconds(500))
-            }
-        }
-        let catalogs = await loadCatalogs()
-        self.catalogs = catalogs
-        coins = catalogs.coins
-        select(coin)
-    }
-
-    func select(_ symbol: String) {
-        guard let catalogs else { return }
-        coin = symbol
-        UserDefaults.standard.set(symbol, forKey: Keys.coin)
-        feed?.cancel()
-        generation += 1
-        let generation = generation
-
-        markets = catalogs.markets(for: symbol)
-        statuses = [:]
-        counts = [:]
-        lastPrice = nil
-        dom.clear()
-        feed = startFeed(
-            markets: markets,
-            catalogs: catalogs,
-            onTrades: { [weak self] trades in
-                guard let self, self.generation == generation else { return }
-                receive(trades)
-            },
-            onStatus: { [weak self] markets, status in
-                guard let self, self.generation == generation else { return }
-                for market in markets { statuses[market] = status }
-            }
-        )
-    }
-
-    func loadHistory(timeframe: Int) async {
-        await indicator.load(timeframe: timeframe, markets: markets)
-        if lastPrice == nil, let close = indicator.points.last?.candle?.close {
-            priceDecimals = decimals(forPrice: close)
-        }
-    }
-
-    private func receive(_ trades: [Trade]) {
-        if lastPrice == nil, let first = trades.first(where: { !$0.liquidation }) {
-            priceDecimals = decimals(forPrice: first.price)
-        }
-        for trade in trades where !trade.liquidation {
-            counts[trade.market, default: 0] += 1
-            lastPrice = trade.price
-        }
-        indicator.add(trades)
-        dom.add(trades)
-    }
-}
-
 @main
 struct CounterpartyApp: App {
-    @State private var store = MarketStore()
+    @State private var workspace = Workspace()
     @State private var themes = ThemeStore()
+    @State private var help = HelpMode()
 
     init() {
         // a bare executable (swift run) starts as a background process without this
@@ -103,15 +15,16 @@ struct CounterpartyApp: App {
 
     var body: some Scene {
         Window("Counterparty", id: "main") {
-            ContentView(store: store, themes: themes)
+            ContentView(workspace: workspace, themes: themes)
+                .environment(help)
                 .frame(minWidth: 900, minHeight: 560)
                 .task {
                     NSApplication.shared.activate()
-                    await store.start()
+                    await workspace.start()
                 }
         }
         .defaultSize(width: 1400, height: 860)
-        .commands { ViewCommands(store: store) }
+        .commands { AppCommands(workspace: workspace, themes: themes, help: help) }
 
         Settings {
             SettingsView(themes: themes)
@@ -124,55 +37,65 @@ private enum Keys {
     static let showIndicator = "showIndicator"
     static let showDom = "showDom"
     static let timeframe = "timeframe"
-    static let tick = "tick"
-    static let coin = "coin"
 }
 
 private let timeframes = [(5, "5s"), (15, "15s"), (60, "1m"), (300, "5m"), (900, "15m")]
-// multiples of the dom's unit, so $1 to $100 for btc and $0.01 to $1 for sol
-private let ticks = [1, 5, 10, 25, 50, 100]
 
-private func rowSize(_ tick: Int, unit: Double?) -> String {
-    guard let unit else { return "\(tick)×" }
-    // as many decimals as the unit has, $0.025 stays $0.025
-    let digits = max(0, -Int(log10(unit).rounded()))
-    return "$" + (Double(tick) * unit).formatted(.number.precision(.fractionLength(digits)).locale(Locale(identifier: "en_US")))
-}
-
-// the same switches as the header, so they stay reachable when a theme hides it
-struct ViewCommands: Commands {
-    let store: MarketStore
+// menus mirror the header, so everything stays reachable when a theme hides it
+struct AppCommands: Commands {
+    let workspace: Workspace
+    let themes: ThemeStore
+    let help: HelpMode
 
     @AppStorage(Keys.showIndicator) private var showIndicator = true
     @AppStorage(Keys.showDom) private var showDom = true
     @AppStorage(Keys.timeframe) private var timeframe = 60
-    @AppStorage(Keys.tick) private var tick = 10
 
     var body: some Commands {
+        // ⌘P is search everywhere in the app, there's nothing to print
+        CommandGroup(replacing: .printItem) {
+            Button("Search Coins…") { workspace.search = .replace }.keyboardShortcut("p")
+        }
+        CommandGroup(replacing: .newItem) {
+            Button("New Tab…") { workspace.search = .newTab }.keyboardShortcut("t")
+            Button("Close Tab") {
+                if let selected = workspace.selected { workspace.close(selected) }
+            }
+            .keyboardShortcut("w")
+            .disabled(workspace.tabs.count < 2)
+        }
+        CommandMenu("Tabs") {
+            Button("Next Tab") { workspace.selectNeighbor(1) }.keyboardShortcut(.tab, modifiers: .control)
+            Button("Previous Tab") { workspace.selectNeighbor(-1) }.keyboardShortcut(.tab, modifiers: [.control, .shift])
+            Divider()
+            ForEach(Array(workspace.tabs.prefix(9).enumerated()), id: \.element.id) { index, session in
+                Button(session.coin) { workspace.select(number: index + 1) }
+                    .keyboardShortcut(KeyEquivalent(Character("\(index == 8 ? 9 : index + 1)")))
+            }
+        }
         CommandGroup(before: .toolbar) {
-            Button("Choose Coin…") { store.choosingCoin = true }.keyboardShortcut("k")
-            Toggle("Indicator", isOn: $showIndicator).keyboardShortcut("1")
-            Toggle("DOM", isOn: $showDom).keyboardShortcut("2")
+            Toggle("Indicator", isOn: $showIndicator).keyboardShortcut("i", modifiers: [.command, .option])
+            Toggle("DOM", isOn: $showDom).keyboardShortcut("d", modifiers: [.command, .option])
             Picker("Timeframe", selection: $timeframe) {
                 ForEach(timeframes, id: \.0) { Text($0.1).tag($0.0) }
             }
-            Picker("DOM Row Size", selection: $tick) {
-                ForEach(ticks, id: \.self) { Text(rowSize($0, unit: store.dom.unit)).tag($0) }
+            Toggle("Explain Numbers", isOn: Binding(get: { help.on }, set: { help.on = $0 })).keyboardShortcut("/")
+            Picker("Theme", selection: Binding(get: { themes.choice }, set: { themes.choose($0) })) {
+                ForEach(themes.choices, id: \.self) { Text(themes.title(of: $0)).tag($0) }
             }
-            Button("Reset DOM") { store.dom.reset() }.keyboardShortcut("r", modifiers: [.command, .shift])
             Divider()
         }
     }
 }
 
 struct ContentView: View {
-    let store: MarketStore
+    let workspace: Workspace
     let themes: ThemeStore
 
     @AppStorage(Keys.showIndicator) private var showIndicator = true
     @AppStorage(Keys.showDom) private var showDom = true
     @AppStorage(Keys.timeframe) private var timeframe = 60
-    @AppStorage(Keys.tick) private var tick = 10
+    @Environment(HelpMode.self) private var help
 
     var body: some View {
         let theme = themes.theme
@@ -189,57 +112,90 @@ struct ContentView: View {
                 .padding(.vertical, 6)
                 .background(theme.colors.sell.color.opacity(0.25))
             }
-            if theme.show.header {
-                header(theme)
-                border.frame(height: 1)
-            }
-            GeometryReader { geometry in
-                HStack(spacing: 0) {
-                    if showIndicator {
-                        IndicatorView(model: store.indicator, timeframe: timeframe, theme: theme)
-                    }
-                    if showIndicator && showDom {
-                        border.frame(width: 1)
-                    }
-                    if showDom {
-                        // in a narrow window the dom gives the chart at least 60% of the width
-                        DomView(model: store.dom, tick: tick, theme: theme)
-                            .frame(width: showIndicator ? min(theme.layout.domWidth, geometry.size.width * 0.4) : nil)
-                    }
-                    if !showIndicator && !showDom {
-                        Text("Both views are off. Turn on Indicator or DOM (View menu, ⌘1 / ⌘2).")
-                            .foregroundStyle(theme.colors.muted.color)
-                            .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    }
+            if let session = workspace.selected {
+                if theme.show.tabs {
+                    TabStrip(workspace: workspace, theme: theme)
+                    border.frame(height: 1)
                 }
-            }
-            if theme.show.marketsBar {
-                border.frame(height: 1)
-                MarketsBar(store: store, theme: theme)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(theme.colors.panel.color)
+                if theme.show.header {
+                    HeaderBar(workspace: workspace, session: session, theme: theme)
+                    border.frame(height: 1)
+                }
+                panes(session, theme)
+                    // a new tab or timeframe starts the chart fresh: scrolled to now, auto-scaled
+                    .id("\(session.id)|\(timeframe)")
+                    .task(id: "\(session.id)|\(timeframe)") { await session.loadHistory(timeframe: timeframe) }
+                if theme.show.marketsBar {
+                    border.frame(height: 1)
+                    MarketsBar(session: session, failures: workspace.catalogs?.failures, theme: theme)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(theme.colors.panel.color)
+                }
+            } else {
+                ProgressView("Reading every exchange's markets…")
+                    .foregroundStyle(theme.colors.muted.color)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
         .background(theme.colors.background.color)
+        .coordinateSpace(.named(HelpMode.space))
+        .overlay { HelpCard(help: help, theme: theme) }
+        // esc leaves the (?) mode
+        .background {
+            if help.on {
+                Button("") { help.on = false }.keyboardShortcut(.cancelAction).hidden()
+            }
+        }
         .toolbarBackground(theme.colors.panel.color, for: .windowToolbar)
         .preferredColorScheme(theme.appearance == .light ? .light : .dark)
         .tint(theme.colors.accent.color)
-        // a new coin or timeframe loads its history, after the product lists are read
-        .task(id: "\(store.markets)|\(timeframe)") {
-            guard !store.markets.isEmpty else { return }
-            await store.loadHistory(timeframe: timeframe)
-        }
-        .sheet(isPresented: Binding(get: { store.choosingCoin }, set: { store.choosingCoin = $0 })) {
-            CoinPicker(store: store, theme: theme)
+        // the other tabs' history loads in the background, in the same timeframe
+        .task(id: "\(timeframe)|\(workspace.tabs.map(\.id))") { await workspace.prefetch(timeframe: timeframe) }
+        .sheet(item: Binding(get: { workspace.search }, set: { workspace.search = $0 })) { mode in
+            CoinPicker(workspace: workspace, mode: mode, theme: theme)
         }
     }
 
+    private func panes(_ session: CoinSession, _ theme: Theme) -> some View {
+        GeometryReader { geometry in
+            HStack(spacing: 0) {
+                if showIndicator {
+                    IndicatorView(model: session.indicator, timeframe: timeframe, theme: theme)
+                }
+                if showIndicator && showDom {
+                    theme.colors.border.color.frame(width: 1)
+                }
+                if showDom {
+                    // in a narrow window the dom gives the chart at least 60% of the width
+                    DomView(coin: session.coin, book: session.book, tapes: session.tapes, bookMarkets: session.markets.filter { hasBook($0) }, theme: theme)
+                        .frame(width: showIndicator ? min(theme.layout.domWidth, geometry.size.width * 0.4) : nil)
+                }
+                if !showIndicator && !showDom {
+                    Text("Both views are off. Turn on Indicator or DOM (View menu, ⌥⌘I / ⌥⌘D).")
+                        .foregroundStyle(theme.colors.muted.color)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
+            }
+        }
+    }
+}
+
+// the header is its own view, so its live price only redraws the header and not the chart and ladder under it
+struct HeaderBar: View {
+    let workspace: Workspace
+    let session: CoinSession
+    let theme: Theme
+
+    @AppStorage(Keys.showIndicator) private var showIndicator = true
+    @AppStorage(Keys.showDom) private var showDom = true
+    @AppStorage(Keys.timeframe) private var timeframe = 60
+
     // the widest layout that fits wins, so labels drop out one by one instead of wrapping letter by letter
-    private func header(_ theme: Theme) -> some View {
+    var body: some View {
         ViewThatFits(in: .horizontal) {
-            headerRow(theme, subtitle: theme.show.headerSubtitle, labels: true)
-            headerRow(theme, subtitle: false, labels: true)
-            headerRow(theme, subtitle: false, labels: false)
+            row(subtitle: theme.show.headerSubtitle, labels: true)
+            row(subtitle: false, labels: true)
+            row(subtitle: false, labels: false)
         }
         .foregroundStyle(theme.colors.text.color)
         .controlSize(.small)
@@ -249,34 +205,47 @@ struct ContentView: View {
         .background(theme.colors.panel.color)
     }
 
-    private func headerRow(_ theme: Theme, subtitle: Bool, labels: Bool) -> some View {
+    private func row(subtitle: Bool, labels: Bool) -> some View {
         HStack(spacing: labels ? 18 : 12) {
             if theme.show.headerPrice {
-                Text(store.price.map(price) ?? "—")
+                LivePrice(session: session)
                     .font(theme.mono(3, weight: .semibold))
                     .foregroundStyle(theme.colors.text.color)
                     .fixedSize()
+                    .explain(Hint(
+                        "Last traded price: the newest trade from any of \(session.coin)'s perps, refreshed twice a second. It mixes exchanges, so it can sit a few dollars off any single exchange's own price.",
+                        example: "Fine: this reads 77,140 while Binance shows 77,138, that's two venues a tick apart. Not fine: it sits far from the chart's last close for long, one venue is lagging; check the bar at the bottom for a market that's down."
+                    ))
                     .frame(minWidth: 90, alignment: .leading)
             }
             Button {
-                store.choosingCoin = true
+                workspace.search = .replace
             } label: {
                 HStack(spacing: 4) {
-                    Text(store.coin).font(theme.mono(1, weight: .semibold))
+                    Text(session.coin).font(theme.mono(1, weight: .semibold))
                     Image(systemName: "chevron.down").font(.system(size: 9, weight: .semibold))
                 }
             }
             .buttonStyle(.borderless)
             .foregroundStyle(theme.colors.text.color)
-            .help("Choose a coin (⌘K)")
+            .help("Search coins (⌘P)")
             .fixedSize()
+            .explain(Hint(
+                "The coin on screen. Click it, or press ⌘P, to search every coin that has a perp.",
+                example: "⌘P then type SOL and ⏎ swaps this tab to SOL; ⌘⏎ opens SOL in a new tab and keeps this one streaming."
+            ))
             if subtitle {
-                Text(store.catalogs == nil ? "loading markets…" : "\(store.markets.count) markets")
+                Text("\(session.markets.count) perps")
                     .foregroundStyle(theme.colors.muted.color)
                     .fixedSize()
+                    .explain(Hint(
+                        "\(session.markets.count) perpetual futures feed this coin: every USDT, USDC and coin-margined perp of it on Binance Futures, Bitfinex, Bybit, Deribit and OKX. Each one is listed in the bar at the bottom.",
+                        example: "More perps means a truer picture: BTC's 10 markets show the whole market's flow. A small coin with 1 perp shows one venue only, so its volume and liquidations are a slice, not the market."
+                    ))
             }
             Spacer(minLength: 12)
             Toggle("Indicator", isOn: $showIndicator).toggleStyle(.switch).fixedSize()
+                .explain(Hint("Shows or hides the chart (⌥⌘I).", example: "Turn it off to give the whole window to the order book while you watch a level get tested."))
             Picker("Timeframe", selection: $timeframe) {
                 ForEach(timeframes, id: \.0) { Text($0.1).tag($0.0) }
             }
@@ -284,52 +253,151 @@ struct ContentView: View {
             .labelsHidden()
             .fixedSize()
             .disabled(!showIndicator)
+            .explain(Hint(
+                "How much time one candle covers. History comes from aggr's server, so every timeframe has the same data aggr.trade shows.",
+                example: "5m or 15m to see the trend and the levels that matter. 5s or 15s to watch how price acts right at one of those levels. Trading off 5s alone means reacting to noise."
+            ))
             theme.colors.border.color.frame(width: 1, height: 18)
             Toggle("DOM", isOn: $showDom).toggleStyle(.switch).fixedSize()
-            // an empty title drops the label in the compact layouts
-            Picker(labels ? "Row size" : "", selection: $tick) {
-                ForEach(ticks, id: \.self) { Text(rowSize($0, unit: store.dom.unit)).tag($0) }
+                .explain(Hint("Shows or hides the order book ladder (⌥⌘D).", example: "Turn it off when you only want the chart; the book keeps streaming in the background so it's ready when it comes back."))
+        }
+    }
+}
+
+// just the number, the only part of the header and the tabs that changes every half second
+struct LivePrice: View {
+    let session: CoinSession
+
+    var body: some View {
+        if let value = session.price, let decimals = session.indicator.decimals {
+            Text(price(value, decimals: decimals))
+        } else {
+            Text("—")
+        }
+    }
+}
+
+// one tab per open coin, with its live price, like browser tabs
+struct TabStrip: View {
+    let workspace: Workspace
+    let theme: Theme
+    @Environment(HelpMode.self) private var help
+
+    var body: some View {
+        HStack(spacing: 0) {
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 2) {
+                    ForEach(Array(workspace.tabs.enumerated()), id: \.element.id) { index, session in
+                        TabItem(workspace: workspace, session: session, number: index + 1, theme: theme)
+                    }
+                }
+                .padding(.horizontal, 6)
             }
-            .pickerStyle(.menu)
-            .fixedSize()
-            .disabled(!showDom)
-            if labels {
-                Button("Reset DOM") { store.dom.reset() }.disabled(!showDom)
-            } else {
-                Button("Reset DOM", systemImage: "arrow.counterclockwise") { store.dom.reset() }
-                    .labelStyle(.iconOnly)
-                    .help("Reset DOM")
-                    .disabled(!showDom)
+            Button {
+                help.on.toggle()
+            } label: {
+                Image(systemName: help.on ? "questionmark.circle.fill" : "questionmark.circle")
+            }
+            .buttonStyle(.borderless)
+            .foregroundStyle((help.on ? theme.colors.accent : theme.colors.muted).color)
+            .help(help.on ? "Stop explaining (esc)" : "Explain what everything means: hover anything (⌘/)")
+            .padding(.leading, 10)
+            Button {
+                workspace.search = .newTab
+            } label: {
+                Image(systemName: "plus")
+            }
+            .buttonStyle(.borderless)
+            .help("New tab (⌘T)")
+            .padding(.horizontal, 10)
+        }
+        .frame(height: 30)
+        .background(theme.colors.background.color)
+    }
+}
+
+// each tab its own view, so one coin's price tick redraws that tab only
+struct TabItem: View {
+    let workspace: Workspace
+    let session: CoinSession
+    let number: Int
+    let theme: Theme
+
+    var body: some View {
+        let selected = workspace.selected === session
+        HStack(spacing: 6) {
+            Text(session.coin).font(theme.mono(0, weight: selected ? .semibold : .regular))
+            // green or red against the last closed bar, so a background tab still says which way it's going
+            LivePrice(session: session)
+                .font(theme.mono(-1))
+                .foregroundStyle(session.rising.map { ($0 ? theme.colors.buy : theme.colors.sell).color } ?? theme.colors.muted.color)
+            if workspace.tabs.count > 1 {
+                Button {
+                    workspace.close(session)
+                } label: {
+                    Image(systemName: "xmark").font(.system(size: 8, weight: .bold))
+                }
+                .buttonStyle(.borderless)
+                .foregroundStyle(theme.colors.muted.color)
+                .help("Close tab (⌘W)")
             }
         }
+        .foregroundStyle((selected ? theme.colors.text : theme.colors.muted).color)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 5)
+        .background(selected ? theme.colors.panel.color : .clear, in: .rect(cornerRadius: 5))
+        .overlay(RoundedRectangle(cornerRadius: 5).stroke(selected ? theme.colors.border.color : .clear))
+        .contentShape(.rect)
+        .onTapGesture { workspace.select(session) }
+        .help(number <= 9 ? "⌘\(number)" : "")
+        .draggable(session.coin)
+        .dropDestination(for: String.self) { coins, _ in
+            guard let coin = coins.first, let moved = workspace.tabs.first(where: { $0.coin == coin }) else { return false }
+            workspace.move(moved, before: session)
+            return true
+        }
+        .explain(Hint(
+            "\(session.coin) tab. The number is the last traded price, in the buy colour when it's above the close of the previous bar in the chart's timeframe and the sell colour when below. Every tab keeps streaming in the background. \(number <= 9 ? "⌘\(number) jumps here, d" : "D")rag to reorder.",
+            example: "Keep the coins you trade open as tabs: with BTC on screen, an ETH tab flipping to the sell colour tells you ETH is weakening before you look at it."
+        ))
     }
 }
 
 // connection state and trade count per market, to compare against aggr
 struct MarketsBar: View {
-    let store: MarketStore
+    let session: CoinSession
+    // exchanges whose product list failed, nil while they're still loading
+    let failures: [(exchange: String, reason: String)]?
     let theme: Theme
 
     var body: some View {
         FlowLayout {
-            ForEach(store.markets, id: \.self) { market in
-                let status = store.statuses[market]
-                let count = store.tradeCounts[market]
+            ForEach(session.markets, id: \.self) { market in
+                let status = session.statuses[market]
+                let count = session.tradeCounts[market]
                 HStack(spacing: 5) {
                     Circle().fill(color(status, live: count != nil)).frame(width: 7, height: 7)
                     Text(market).foregroundStyle(theme.colors.muted.color)
                     Text("\(count ?? 0)").foregroundStyle(theme.colors.text.color)
                 }
                 .help(describe(status))
+                .explain(Hint(
+                    "\(market): one perp feeding \(session.coin), exchange then its own symbol. \(count ?? 0) trades came in since this tab opened. The dot is the connection, now \(describe(status)). Its colour is live when trades are arriving, pending while connecting or before the first trade, and down when the socket dropped and is retrying.",
+                    example: "Normal: big venues count hundreds while Deribit or Bitfinex count a few dozen, they're smaller. A problem: a big venue stuck at 0 or a down dot for minutes. Its flow is missing from the chart, so volume and delta read low."
+                ))
             }
             // an exchange whose product list failed has no markets to show, so it gets its own chip
-            if let catalogs = store.catalogs {
-                ForEach(catalogs.failures, id: \.exchange) { failure in
+            if let failures {
+                ForEach(failures, id: \.exchange) { failure in
                     HStack(spacing: 5) {
                         Circle().fill(theme.colors.statusDown.color).frame(width: 7, height: 7)
                         Text("\(failure.exchange) products failed").foregroundStyle(theme.colors.muted.color)
                     }
                     .help(failure.reason)
+                    .explain(Hint(
+                        "\(failure.exchange)'s market list couldn't be read, so its perps are missing from this coin: \(failure.reason)",
+                        example: "Until it comes back, the chart and volume leave that exchange out. Reopening the app retries the list."
+                    ))
                 }
             }
         }

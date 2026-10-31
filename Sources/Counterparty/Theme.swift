@@ -109,13 +109,10 @@ struct Theme: Codable, Equatable {
         var grid: ThemeColor
         var crosshair: ThemeColor
         var priceTagText: ThemeColor
-        // dom
+        // dom: book size bars and the mid row
         var domBuyBar: ThemeColor
         var domSellBar: ThemeColor
         var domCurrentRow: ThemeColor
-        var domFlashBuy: ThemeColor
-        var domFlashSell: ThemeColor
-        var domLiquidation: ThemeColor
         // market connection dots
         var statusLive: ThemeColor
         var statusPending: ThemeColor
@@ -125,6 +122,8 @@ struct Theme: Codable, Equatable {
     struct Show: Codable, Equatable {
         // header bar with the price and switches, the view menu still has every switch when it's hidden
         var header: Bool
+        // the strip of open coins above the header, ⌘1-9 and the tabs menu still switch when it's hidden
+        var tabs: Bool
         var headerPrice: Bool
         var headerSubtitle: Bool
         var marketsBar: Bool
@@ -139,9 +138,7 @@ struct Theme: Codable, Equatable {
         var cvd: Bool
         var lastPriceLine: Bool
         var crosshair: Bool
-        var domHeader: Bool
-        var domLiquidations: Bool
-        var domDelta: Bool
+        // the size bars behind the book's numbers
         var domBars: Bool
     }
 
@@ -193,19 +190,16 @@ struct Theme: Codable, Equatable {
             domBuyBar: ThemeColor(hex: "#3BCA6D59"),
             domSellBar: ThemeColor(hex: "#EB1E2F59"),
             domCurrentRow: ThemeColor(hex: "#FFFFFF14"),
-            domFlashBuy: ThemeColor(hex: "#3BCA6D"),
-            domFlashSell: ThemeColor(hex: "#EB1E2F"),
-            domLiquidation: ThemeColor(hex: "#FFB74D"),
             statusLive: ThemeColor(hex: "#3BCA6D"),
             statusPending: ThemeColor(hex: "#FFB74D"),
             statusDown: ThemeColor(hex: "#EB1E2F")
         ),
         show: Show(
-            header: true, headerPrice: true, headerSubtitle: true, marketsBar: true,
+            header: true, tabs: true, headerPrice: true, headerSubtitle: true, marketsBar: true,
             legend: true, grid: true, priceAxis: true, timeAxis: true,
             candles: true, volume: true, delta: true, liquidations: true, cvd: true,
             lastPriceLine: true, crosshair: true,
-            domHeader: true, domLiquidations: true, domDelta: true, domBars: true
+            domBars: true
         ),
         layout: Layout(domWidth: 440, domRowHeight: 20, candleWidth: 0.7)
     )
@@ -288,25 +282,64 @@ extension Theme {
     }
 }
 
-// the active theme. an imported file is copied into application support so it survives the original moving
+// the active theme: one of the built-ins by name, or the imported file.
+// an imported file is copied into application support so it survives the original moving
 @MainActor @Observable
 final class ThemeStore {
+    static let custom = "custom"
+
     private(set) var theme = Theme.standard
+    // a built-in theme's name, or ThemeStore.custom
+    private(set) var choice = Theme.standard.name
+    // the imported theme, nil when none was imported
+    private(set) var imported: Theme?
     private(set) var error: String?
-    // where the active theme was imported from, reload reads it again after edits
+    // where the imported theme came from, reload reads it again after edits
     private(set) var source: URL?
 
     private static let folder = URL.applicationSupportDirectory.appending(path: "Counterparty")
     private static let saved = folder.appending(path: "theme.json")
+    private static let choiceKey = "themeChoice"
+    private static let sourceKey = "themeSource"
+
+    // built-ins first, then the imported one
+    var choices: [String] {
+        Theme.builtins.map(\.name) + (imported == nil ? [] : [Self.custom])
+    }
+
+    func title(of choice: String) -> String {
+        guard choice == Self.custom, let imported else { return choice }
+        return "\(imported.name) (imported)"
+    }
 
     init() {
-        source = UserDefaults.standard.url(forKey: "themeSource")
-        guard FileManager.default.fileExists(atPath: Self.saved.path) else { return }
-        do {
-            theme = try Theme.load(Data(contentsOf: Self.saved))
-        } catch {
-            self.error = "Saved theme couldn't be loaded, using the default. \(error.localizedDescription)"
+        source = UserDefaults.standard.url(forKey: Self.sourceKey)
+        if FileManager.default.fileExists(atPath: Self.saved.path) {
+            do {
+                imported = try Theme.load(Data(contentsOf: Self.saved))
+            } catch {
+                self.error = "Imported theme couldn't be loaded. \(error.localizedDescription)"
+            }
         }
+        // before built-ins existed, an imported file was always the active theme
+        UserDefaults.standard.register(defaults: [Self.choiceKey: imported == nil ? Theme.standard.name : Self.custom])
+        let saved = UserDefaults.standard.string(forKey: Self.choiceKey)!
+        if choices.contains(saved) {
+            choose(saved)
+        } else if error == nil {
+            error = "Theme \"\(saved)\" no longer exists, using the default."
+        }
+    }
+
+    func choose(_ choice: String) {
+        if choice == Self.custom {
+            guard let imported else { return }
+            theme = imported
+        } else {
+            theme = Theme.builtins.first { $0.name == choice }!
+        }
+        self.choice = choice
+        UserDefaults.standard.set(choice, forKey: Self.choiceKey)
     }
 
     func importTheme(from url: URL) {
@@ -315,10 +348,11 @@ final class ThemeStore {
             let loaded = try Theme.load(data)
             try FileManager.default.createDirectory(at: Self.folder, withIntermediateDirectories: true)
             try data.write(to: Self.saved, options: .atomic)
-            theme = loaded
+            imported = loaded
             source = url
-            UserDefaults.standard.set(url, forKey: "themeSource")
+            UserDefaults.standard.set(url, forKey: Self.sourceKey)
             error = nil
+            choose(Self.custom)
         } catch {
             self.error = "\(url.lastPathComponent): \(error.localizedDescription)"
         }
@@ -329,18 +363,20 @@ final class ThemeStore {
         importTheme(from: source)
     }
 
-    func reset() {
+    // deletes the imported theme, and goes back to the default if it was in use
+    func removeImported() {
         do {
             if FileManager.default.fileExists(atPath: Self.saved.path) {
                 try FileManager.default.removeItem(at: Self.saved)
             }
         } catch {
-            self.error = "Couldn't remove the saved theme: \(error.localizedDescription)"
+            self.error = "Couldn't remove the imported theme: \(error.localizedDescription)"
             return
         }
-        UserDefaults.standard.removeObject(forKey: "themeSource")
-        theme = .standard
+        UserDefaults.standard.removeObject(forKey: Self.sourceKey)
+        imported = nil
         source = nil
         error = nil
+        if choice == Self.custom { choose(Theme.standard.name) }
     }
 }

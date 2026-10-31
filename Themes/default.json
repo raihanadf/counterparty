@@ -15,9 +15,6 @@
     "deltaUp" : "#3BCA6D",
     "domBuyBar" : "#3BCA6D59",
     "domCurrentRow" : "#FFFFFF14",
-    "domFlashBuy" : "#3BCA6D",
-    "domFlashSell" : "#EB1E2F",
-    "domLiquidation" : "#FFB74D",
     "domSellBar" : "#EB1E2F59",
     "grid" : "#FFFFFF0D",
     "liquidationBuy" : "#FF4CF3",
@@ -51,9 +48,6 @@
     "cvd" : true,
     "delta" : true,
     "domBars" : true,
-    "domDelta" : true,
-    "domHeader" : true,
-    "domLiquidations" : true,
     "grid" : true,
     "header" : true,
     "headerPrice" : true,
@@ -63,6 +57,7 @@
     "liquidations" : true,
     "marketsBar" : true,
     "priceAxis" : true,
+    "tabs" : true,
     "timeAxis" : true,
     "volume" : true
   }

@@ -10,12 +10,21 @@ struct SettingsView: View {
     var body: some View {
         Form {
             Section("Theme") {
-                LabeledContent("Active", value: themes.theme.name)
-                LabeledContent("File") {
-                    Text(themes.source?.path ?? "built in").textSelection(.enabled).lineLimit(2).truncationMode(.middle)
+                // a swatch of each theme's background, candles and accent, click to switch
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 120), spacing: 10)], spacing: 10) {
+                    ForEach(themes.choices, id: \.self) { choice in
+                        swatch(choice)
+                    }
                 }
+                .padding(.vertical, 4)
                 if let error = themes.error ?? exportError {
                     Text(error).foregroundStyle(.red).textSelection(.enabled)
+                }
+            }
+
+            Section("Imported theme") {
+                LabeledContent("File") {
+                    Text(themes.source?.path ?? "none").textSelection(.enabled).lineLimit(2).truncationMode(.middle)
                 }
                 HStack {
                     Button("Import Theme…") { importTheme() }
@@ -23,8 +32,8 @@ struct SettingsView: View {
                         .disabled(themes.source == nil)
                         .help("Read the imported file again after editing it")
                     Spacer()
-                    Button("Reset to Default") { themes.reset() }
-                        .disabled(themes.source == nil && themes.theme == .standard)
+                    Button("Remove") { themes.removeImported() }
+                        .disabled(themes.imported == nil)
                 }
                 HStack {
                     Button("Export Current Theme…") { export(themes.theme) }
@@ -44,7 +53,36 @@ struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
-        .frame(width: 560)
+        .frame(width: 560, height: 680)
+    }
+
+    private func swatch(_ choice: String) -> some View {
+        let theme = choice == ThemeStore.custom ? themes.imported! : Theme.builtins.first { $0.name == choice }!
+        let colors = theme.colors
+        let selected = themes.choice == choice
+        return Button {
+            themes.choose(choice)
+        } label: {
+            VStack(alignment: .leading, spacing: 6) {
+                // a tiny chart: four candles and a volume strip on the theme's background
+                HStack(alignment: .bottom, spacing: 4) {
+                    ForEach(Array([(true, 18.0), (false, 12.0), (true, 24.0), (false, 9.0)].enumerated()), id: \.offset) { _, candle in
+                        (candle.0 ? colors.candleUp : colors.candleDown).color.frame(width: 7, height: candle.1)
+                    }
+                    Spacer()
+                    colors.accent.color.frame(width: 10, height: 10).clipShape(.circle)
+                }
+                .padding(8)
+                .frame(height: 44)
+                .background(colors.background.color, in: .rect(cornerRadius: 5))
+                .overlay(RoundedRectangle(cornerRadius: 5).stroke(colors.border.color))
+                Text(themes.title(of: choice)).font(.caption).lineLimit(1)
+            }
+            .padding(5)
+            .background(selected ? Color.accentColor.opacity(0.2) : .clear, in: .rect(cornerRadius: 7))
+            .overlay(RoundedRectangle(cornerRadius: 7).stroke(selected ? Color.accentColor : .clear, lineWidth: 2))
+        }
+        .buttonStyle(.plain)
     }
 
     private func importTheme() {
