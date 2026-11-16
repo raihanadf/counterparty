@@ -1,4 +1,5 @@
 import AppKit
+import CounterpartyKit
 import SwiftUI
 
 // the chart, with tradingview-style handling (bybit uses tradingview):
@@ -35,9 +36,12 @@ struct ChartFrame {
     let visible: Range<Int>
     // nil when no visible bar has a price yet
     let range: ClosedRange<Double>?
+    // the rsi has its own band under the candles, which end higher to make room
+    let rsi: Bool
 
-    init(points: [Point], width: Double, height: Double, viewport: Viewport) {
+    init(points: [Point], width: Double, height: Double, viewport: Viewport, rsi: Bool = false) {
         self.width = width
+        self.rsi = rsi
         self.height = height
         spacing = viewport.spacing
         count = points.count
@@ -80,9 +84,10 @@ struct ChartFrame {
         return visible.contains(index) ? index : nil
     }
 
-    // candles sit between 10% from the top and 25% from the bottom, like aggr's price scale margins
+    // candles sit between 10% from the top and 25% from the bottom, like aggr's price scale margins.
+    // with the rsi on they stop at 60%, and the rsi takes 62% to 74%
     var bandTop: Double { height * 0.1 }
-    var bandBottom: Double { height * 0.75 }
+    var bandBottom: Double { height * (rsi ? 0.6 : 0.75) }
 
     func y(_ price: Double, in range: ClosedRange<Double>) -> Double {
         bandBottom - (price - range.lowerBound) / (range.upperBound - range.lowerBound) * (bandBottom - bandTop)
@@ -108,11 +113,13 @@ private struct DragState {
 private typealias Mark = (note: Note, at: CGPoint)
 
 struct IndicatorView: View {
-    let coin: String
-    let model: IndicatorModel
+    let session: CoinSession
     let journal: Journal
     let timeframe: Int
     let theme: Theme
+
+    private var coin: String { session.coin }
+    private var model: IndicatorModel { session.chart(timeframe) }
 
     @State private var viewport = Viewport()
     @State private var drag: DragState?
@@ -126,6 +133,8 @@ struct IndicatorView: View {
     @State private var size = CGSize.zero
     @FocusState private var writing: Bool
     @AppStorage(Keys.showJournal) private var showJournal = false
+    @AppStorage(Keys.showVwap) private var showVwap = false
+    @AppStorage(Keys.showRsi) private var showRsi = false
     @Environment(HelpMode.self) private var help
 
     private var painter: ChartPainter { ChartPainter(theme: theme, decimals: model.decimals, timeframe: timeframe) }
@@ -144,12 +153,13 @@ struct IndicatorView: View {
                 let front = marks.first(where: { $0.note.id == draft?.id })
                     ?? marks.first(where: { $0.note.id == opened })
                     ?? (drag == nil ? hover.flatMap { hit($0, marks) } : nil)
+                let studies = studies(points)
                 Canvas { context, _ in
-                    painter.draw(points, frame, crosshair: drag == nil ? hover : nil, level: front?.note.price, in: &context)
+                    painter.draw(points, frame, crosshair: drag == nil ? hover : nil, level: front?.note.price, studies: studies, in: &context)
                 }
                 .explain { point, _ in explanation(at: point, frame) }
                 .overlay(alignment: .topLeading) {
-                    if theme.show.legend { legend(points, frame) }
+                    if theme.show.legend { legend(points, frame, studies) }
                 }
                 // every note of the coin is a small avatar on the bar and price it was taken at
                 .overlay {
@@ -176,6 +186,20 @@ struct IndicatorView: View {
                     if let front { float(card(front.note), at: front.at, in: frame) }
                 }
                 .onChange(of: geometry.size, initial: true) { size = geometry.size }
+                // scrolled back to the oldest bars: the page before them is fetched and put in front.
+                // the bar count is watched, so it asks again after each page while the edge is still in view.
+                // its own task, a new live bar or scrolling away mustn't cancel a page that's on its way
+                .onChange(of: frame.visible.lowerBound < 60 ? points.count : 0, initial: true) {
+                    guard frame.visible.lowerBound < 60 else { return }
+                    Task {
+                        let added = await model.loadOlder()
+                        // the view counts bars from the newest, bars put in front aren't new ones on the right
+                        viewport.anchor += added
+                    }
+                }
+                .overlay(alignment: .leading) {
+                    if model.loadingOlder { ProgressView().controlSize(.small).padding(.leading, 12) }
+                }
             }
         }
         .opacity(waiting ? 0 : 1)
@@ -205,7 +229,26 @@ struct IndicatorView: View {
     }
 
     private func frame(_ points: [Point], _ size: CGSize) -> ChartFrame {
-        ChartFrame(points: points, width: max(0, size.width - axisWidth), height: max(0, size.height - axisHeight), viewport: viewport)
+        ChartFrame(points: points, width: max(0, size.width - axisWidth), height: max(0, size.height - axisHeight), viewport: viewport, rsi: showRsi)
+    }
+
+    // the lines that are switched on, worked out again from the bars every frame so the live bar moves them
+    private func studies(_ points: [Point]) -> Studies {
+        var studies = Studies()
+        guard let first = points.first else { return studies }
+        // a day's vwap says nothing on bars a day or a week long
+        if showVwap && timeframe < 86400 {
+            // under 5m the loaded bars don't reach back to midnight utc, the 5m chart supplies the start of the day
+            let coarse = timeframe < 300 ? session.chart(300).points : []
+            studies.vwap = vwap(points, timeframe: timeframe, coarse: coarse, coarseTimeframe: 300) { $0 - $0 % 86400 }
+        }
+        if let anchor = session.anchor {
+            // an anchor older than these bars is reached through the first coarser chart that goes back that far
+            let coarser = anchor < first.time ? timeframes.first { $0 > timeframe && (session.chart($0).points.first?.time ?? .max) <= anchor } : nil
+            studies.anchored = vwap(points, timeframe: timeframe, coarse: coarser.map { session.chart($0).points } ?? [], coarseTimeframe: coarser ?? timeframe) { _ in anchor }
+        }
+        if showRsi { studies.rsi = rsi(points) }
+        return studies
     }
 
     // MARK: input
@@ -337,10 +380,20 @@ struct IndicatorView: View {
             ) : nil
         }
         let y = point.y / frame.height
-        if y < 0.75 {
+        if point.y < frame.bandBottom {
+            var text = "Candles: each bar's open, high, low and close, averaged over every perp of the coin like aggr.trade. Up candles closed above their open, down candles below it. Drag or swipe to scroll, pinch to zoom, double-click to come back to now."
+            if showVwap || session.anchor != nil {
+                text += " The line through them is VWAP, what the average buyer paid: since midnight UTC for the day's VWAP, since the bar you anchored for the anchored one (right-click a bar to anchor)."
+            }
             return Hint(
-                "Candles: each bar's open, high, low and close, averaged over every perp of the coin like aggr.trade. Up candles closed above their open, down candles below it. Drag or swipe to scroll, pinch to zoom, double-click to come back to now.",
+                text,
                 example: "Strong: candles closing near their high, one after another, with volume growing. Rejected: a long wick above the body at an old high, with big sells on the tape. Buyers tried and failed, the close tells who won."
+            )
+        }
+        if frame.rsi && y < 0.75 {
+            return Hint(
+                "RSI 14: how much of the last 14 bars' movement was up, from 0 to 100. The dashed lines are 70 and 30. It measures how one-sided the recent bars were, not where price has to go.",
+                example: "In a range: above 70 near the range high often fades back, below 30 near the low often bounces. In a trend it lies: RSI can sit above 70 for hours while price keeps climbing, shorting it there is fading strength. Divergence: price makes a higher high while RSI makes a lower one, the push is weakening."
             )
         }
         if y < 0.84 {
@@ -359,7 +412,7 @@ struct IndicatorView: View {
         )
     }
 
-    private func legend(_ points: [Point], _ frame: ChartFrame) -> some View {
+    private func legend(_ points: [Point], _ frame: ChartFrame, _ studies: Studies) -> some View {
         let index = hover.flatMap { $0.x < frame.width ? frame.index(at: $0.x) : nil } ?? points.indices.last
         return VStack(alignment: .leading, spacing: 2) {
             if let index, let candle = points[index].candle, let decimals = model.decimals {
@@ -388,6 +441,20 @@ struct IndicatorView: View {
                         "Liquidations in the bar, in dollars: positions the exchanges closed because their margin ran out. ↑ is shorts forced to buy, ↓ is longs forced to sell. Exchanges publish them throttled, so bursts are undercounted.",
                         example: "Flush: ↓ in the millions on one bar at a low, and the next bars stop falling. Over-leveraged longs are out, a bounce gets easier. Squeeze: ↑ growing bar after bar while price climbs, shorts forced to buy are what drive the move."
                     ))
+                // a line's value on this bar, nil when the line is off or has nothing there
+                let value = { (line: [Double?]) in line.count == points.count ? line[index] : nil }
+                let lines = [
+                    value(studies.vwap).map { "VWAP \(format($0))" },
+                    value(studies.anchored).map { "AVWAP \(format($0))" },
+                    value(studies.rsi).map { String(format: "RSI %.1f", $0) }
+                ].compactMap { $0 }
+                if !lines.isEmpty {
+                    Text(lines.joined(separator: "  ")).foregroundStyle(theme.colors.accent.color)
+                        .explain(Hint(
+                            "VWAP: the average price paid today, every dollar traded since midnight UTC divided by the coins it bought. AVWAP: the same, counted from the bar you anchored. RSI: how one-sided the last 14 bars were, 0 to 100.",
+                            example: "Above VWAP the average buyer of the day is in profit and dips to it tend to get bought; below it they're underwater and rallies to it tend to get sold. Anchor one at a big high, low or news bar: price coming back to that line is everyone who traded since being at break-even, a level that often reacts."
+                        ))
+                }
             }
         }
         .font(theme.mono(-1))
@@ -439,7 +506,7 @@ struct IndicatorView: View {
         guard let range = frame.range else { return [] }
         let notes = journal.notes.filter { $0.coin == coin && $0.id != draft?.id } + (draft.map { [$0] } ?? [])
         return notes.compactMap { note in
-            let bar = note.time - note.time % timeframe
+            let bar = barStart(note.time, timeframe: timeframe)
             guard let index = points[frame.visible].firstIndex(where: { $0.time >= bar }), points[index].time == bar else { return nil }
             let at = CGPoint(x: frame.x(index), y: frame.y(note.price, in: range))
             return at.x < frame.width && at.y > 0 && at.y < frame.height ? (note, at) : nil
@@ -450,8 +517,8 @@ struct IndicatorView: View {
         marks.first { hypot($0.at.x - location.x, $0.at.y - location.y) < 10 }
     }
 
-    // right click: a new note on the bar and price under the pointer, or what to do with the note there
-    private func menu(at location: CGPoint, points: [Point], size: CGSize) -> NSMenu? {
+    // right click: a new note or a vwap anchor on the bar under the pointer, what to do with the note there, and the lines to show
+    private func menu(at location: CGPoint, points: [Point], size: CGSize) -> NSMenu {
         let frame = frame(points, size)
         let menu = NSMenu()
         if let note = hit(location, marks(points, frame))?.note {
@@ -461,6 +528,7 @@ struct IndicatorView: View {
                 draft = note
             })
             menu.addItem(ActionItem("Delete Note") { journal.delete(note.id) })
+            menu.addItem(.separator())
         } else if location.x < frame.width, location.y < frame.height, let range = frame.range, let index = frame.index(at: location.x), let decimals = model.decimals {
             let value = frame.price(at: location.y, in: range)
             menu.addItem(ActionItem("Add Note at \(price(value, decimals: decimals))") {
@@ -470,9 +538,14 @@ struct IndicatorView: View {
                 let around = Array(points[max(0, index - 60)..<min(points.count, index + 21)])
                 draft = Note(id: UUID(), coin: coin, timeframe: timeframe, time: points[index].time, price: value, decimals: decimals, text: "", created: .now, bars: around)
             })
-        } else {
-            return nil
+            menu.addItem(ActionItem("Anchor VWAP at \(barTime(points[index].time, timeframe: timeframe))") { session.anchor = points[index].time })
+            menu.addItem(.separator())
         }
+        if session.anchor != nil {
+            menu.addItem(ActionItem("Remove Anchored VWAP") { session.anchor = nil })
+        }
+        menu.addItem(ActionItem("VWAP", checked: showVwap) { showVwap.toggle() })
+        menu.addItem(ActionItem("RSI", checked: showRsi) { showRsi.toggle() })
         menu.addItem(.separator())
         menu.addItem(ActionItem(showJournal ? "Hide Journal" : "Show Journal") { showJournal.toggle() })
         return menu
@@ -491,7 +564,7 @@ struct IndicatorView: View {
               let note = journal.notes.first(where: { $0.id == id }), note.coin == coin else { return }
         journal.focus = nil
         let points = model.points
-        guard let index = points.firstIndex(where: { $0.time == note.time - note.time % timeframe }) else {
+        guard let index = points.firstIndex(where: { $0.time == barStart(note.time, timeframe: timeframe) }) else {
             missed = true
             try? await Task.sleep(for: .seconds(4))
             missed = false
@@ -562,13 +635,26 @@ struct IndicatorView: View {
     }
 }
 
-// a bar's start on your clock, with seconds below the minute timeframes
+// a bar's time in fixed english. days and weeks start at midnight utc, so theirs are utc dates
+private func stamp(_ time: Int, _ format: Date.FormatString, utc: Bool = false) -> String {
+    let style = Date.VerbatimFormatStyle(format: format, locale: Locale(identifier: "en_US"), timeZone: utc ? .gmt : .current, calendar: .current)
+    return Date(timeIntervalSince1970: Double(time)).formatted(style)
+}
+
+// a bar's start in full: on your clock, with seconds below the minute timeframes, and the date alone for days and weeks
 func barTime(_ time: Int, timeframe: Int) -> String {
-    let date = Date(timeIntervalSince1970: Double(time))
-    let style = timeframe < 60
-        ? Date.VerbatimFormatStyle(format: "\(day: .twoDigits) \(month: .abbreviated) \(hour: .twoDigits(clock: .twentyFourHour, hourCycle: .zeroBased)):\(minute: .twoDigits):\(second: .twoDigits)", locale: Locale(identifier: "en_US"), timeZone: .current, calendar: .current)
-        : Date.VerbatimFormatStyle(format: "\(day: .twoDigits) \(month: .abbreviated) \(hour: .twoDigits(clock: .twentyFourHour, hourCycle: .zeroBased)):\(minute: .twoDigits)", locale: Locale(identifier: "en_US"), timeZone: .current, calendar: .current)
-    return date.formatted(style)
+    if timeframe >= 86400 { return stamp(time, "\(day: .twoDigits) \(month: .abbreviated) \(year: .defaultDigits)", utc: true) }
+    if timeframe >= 60 { return stamp(time, "\(day: .twoDigits) \(month: .abbreviated) \(hour: .twoDigits(clock: .twentyFourHour, hourCycle: .zeroBased)):\(minute: .twoDigits)") }
+    return stamp(time, "\(day: .twoDigits) \(month: .abbreviated) \(hour: .twoDigits(clock: .twentyFourHour, hourCycle: .zeroBased)):\(minute: .twoDigits):\(second: .twoDigits)")
+}
+
+// the short stamp under the chart: the clock alone on the fast timeframes, the date once a bar is an hour or more
+func axisTime(_ time: Int, timeframe: Int) -> String {
+    if timeframe >= 604800 { return stamp(time, "\(month: .abbreviated) \(year: .defaultDigits)", utc: true) }
+    if timeframe >= 86400 { return stamp(time, "\(day: .twoDigits) \(month: .abbreviated)", utc: true) }
+    if timeframe >= 3600 { return barTime(time, timeframe: timeframe) }
+    if timeframe >= 60 { return stamp(time, "\(hour: .twoDigits(clock: .twentyFourHour, hourCycle: .zeroBased)):\(minute: .twoDigits)") }
+    return stamp(time, "\(hour: .twoDigits(clock: .twentyFourHour, hourCycle: .zeroBased)):\(minute: .twoDigits):\(second: .twoDigits)")
 }
 
 // MARK: drawing
@@ -589,8 +675,8 @@ struct ChartPainter {
     }
     var axisHeight: Double { theme.show.timeAxis ? 20 : 0 }
 
-    // hover is where the crosshair goes, level a note's price to rule across
-    func draw(_ points: [Point], _ frame: ChartFrame, crosshair hover: CGPoint?, level noted: Double?, in context: inout GraphicsContext) {
+    // hover is where the crosshair goes, level a note's price to rule across, studies the lines to draw over the bars
+    func draw(_ points: [Point], _ frame: ChartFrame, crosshair hover: CGPoint?, level noted: Double?, studies: Studies = Studies(), in context: inout GraphicsContext) {
         let colors = theme.colors
         let show = theme.show
         let width = frame.width
@@ -666,7 +752,9 @@ struct ChartPainter {
             if show.grid {
                 plot.stroke(line(CGPoint(x: 0, y: y(level)), CGPoint(x: width, y: y(level))), with: .color(colors.grid.color))
             }
-            if show.priceAxis && y(level) < height - 8 && y(level) > 8 {
+            // beside the rsi band the axis carries 70 and 30, a price label there would sit under them
+            let besideRsi = frame.rsi && y(level) > frame.bandBottom && y(level) < height * 0.76
+            if show.priceAxis && y(level) < height - 8 && y(level) > 8 && !besideRsi {
                 context.draw(Text(format(level)).font(theme.mono(-2)).foregroundStyle(colors.muted.color), at: CGPoint(x: width + 6, y: y(level)), anchor: .leading)
             }
             level += step
@@ -684,6 +772,39 @@ struct ChartPainter {
             }
         }
 
+        // a study's line over the visible bars. it breaks where it has no value, and where it starts over (the day's vwap at midnight utc)
+        func curve(_ values: [Double?], _ color: Color, resets: Int? = nil, to y: (Double) -> Double) {
+            guard values.count == points.count else { return }
+            var path = Path()
+            var drawing = false
+            for index in frame.visible {
+                guard let value = values[index] else {
+                    drawing = false
+                    continue
+                }
+                if let resets, points[index].time % resets == 0 { drawing = false }
+                let point = CGPoint(x: frame.x(index), y: y(value))
+                if drawing { path.addLine(to: point) } else { path.move(to: point) }
+                drawing = true
+            }
+            plot.stroke(path, with: .color(color), lineWidth: 1.2)
+        }
+        curve(studies.vwap, colors.accent.color, resets: 86400, to: y)
+        curve(studies.anchored, colors.liquidationBuy.color, to: y)
+
+        // rsi in its own band between the candles and the liquidations, 0 at the bottom and 100 at the top
+        if studies.rsi.count == points.count {
+            let rsiY = scale(0.62, 0.26, 0, 100)
+            for mark in [30.0, 70.0] {
+                plot.stroke(line(CGPoint(x: 0, y: rsiY(mark)), CGPoint(x: width, y: rsiY(mark))), with: .color(colors.muted.color.opacity(0.4)), style: StrokeStyle(lineWidth: 1, dash: [2, 3]))
+                if show.priceAxis {
+                    tag("\(Int(mark))", at: CGPoint(x: width + 2, y: rsiY(mark)), fill: colors.panel.color, text: colors.muted.color, border: colors.border.color, in: &context)
+                }
+            }
+            curve(studies.rsi, colors.text.color, to: rsiY)
+            context.draw(Text("RSI 14").font(theme.caps()).foregroundStyle(colors.muted.color), at: CGPoint(x: 8, y: rsiY(100)), anchor: .topLeading)
+        }
+
         // last price line, and its tag on the price axis, even when the newest bar is scrolled off screen
         if let last = points.last?.candle {
             let lastY = y(last.close)
@@ -691,20 +812,18 @@ struct ChartPainter {
             if show.lastPriceLine {
                 plot.stroke(line(CGPoint(x: 0, y: lastY), CGPoint(x: width, y: lastY)), with: .color(color.opacity(0.6)), style: StrokeStyle(lineWidth: 1, dash: [1, 3]))
             }
-            if show.priceAxis && lastY > -8 && lastY < height + 8 {
+            // the tag steps aside for a note's tag at nearly the same price, two tags half over each other read as neither
+            let underNote = noted.map { abs(y($0) - lastY) < 16 } ?? false
+            if show.priceAxis && lastY > -8 && lastY < height + 8 && !underNote {
                 tag(format(last.close), at: CGPoint(x: width + 2, y: lastY), fill: color, text: colors.priceTagText.color, in: &context)
             }
         }
 
-        // time axis, a label roughly every 100 points on round bar times
+        // time axis, a label roughly every 100 points on round bar times, 130 where the label carries a date and a clock
         if show.timeAxis {
-            let every = max(1, Int(100 / frame.spacing))
-            let style = timeframe < 60
-                ? Date.VerbatimFormatStyle(format: "\(hour: .twoDigits(clock: .twentyFourHour, hourCycle: .zeroBased)):\(minute: .twoDigits):\(second: .twoDigits)", timeZone: .current, calendar: .current)
-                : Date.VerbatimFormatStyle(format: "\(hour: .twoDigits(clock: .twentyFourHour, hourCycle: .zeroBased)):\(minute: .twoDigits)", timeZone: .current, calendar: .current)
+            let every = max(1, Int((timeframe >= 3600 && timeframe < 86400 ? 130 : 100) / frame.spacing))
             for (x, point) in bars where (point.time / timeframe) % every == 0 && x > 20 && x < width - 20 {
-                let label = Date(timeIntervalSince1970: Double(point.time)).formatted(style)
-                context.draw(Text(label).font(theme.mono(-2)).foregroundStyle(colors.muted.color), at: CGPoint(x: x, y: height + axisHeight / 2))
+                context.draw(Text(axisTime(point.time, timeframe: timeframe)).font(theme.mono(-2)).foregroundStyle(colors.muted.color), at: CGPoint(x: x, y: height + axisHeight / 2))
             }
         }
 
@@ -858,10 +977,11 @@ private struct ChartInputView: NSViewRepresentable {
 private final class ActionItem: NSMenuItem {
     private let run: () -> Void
 
-    init(_ title: String, run: @escaping () -> Void) {
+    init(_ title: String, checked: Bool = false, run: @escaping () -> Void) {
         self.run = run
         super.init(title: title, action: #selector(fire), keyEquivalent: "")
         target = self
+        state = checked ? .on : .off
     }
 
     required init(coder: NSCoder) {

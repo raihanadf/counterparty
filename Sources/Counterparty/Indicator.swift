@@ -42,6 +42,9 @@ struct Point: Codable {
     let cvd: Double
 }
 
+// the timeframes the header offers, seconds per bar
+let timeframes = [5, 15, 60, 300, 900, 3600, 14400, 86400, 604800]
+
 private let historyBars = 400
 
 @MainActor @Observable
@@ -50,6 +53,8 @@ final class IndicatorModel {
     // set when aggr keeps no history for any market of the coin
     private(set) var notice: String?
     private(set) var loading = false
+    // an older page of history is on its way, asked for when the chart is scrolled to its left edge
+    private(set) var loadingOlder = false
     // true once the first history load finished, the dom waits for it so both views start together
     private(set) var ready = false
     // decimals the coin's prices are shown with, known from the first price seen
@@ -65,6 +70,9 @@ final class IndicatorModel {
     @ObservationIgnored private var token = UUID()
     // trades that land while history loads, replayed on top of it
     @ObservationIgnored private var buffered: [Trade] = []
+    @ObservationIgnored private var markets: [String] = []
+    // aggr has nothing before the oldest bar, so the chart stops asking
+    @ObservationIgnored private var exhausted = false
 
     // the chart reads this on every frame, only the live bar is recomputed
     var points: [Point] {
@@ -77,11 +85,15 @@ final class IndicatorModel {
         closed.last?.candle?.close
     }
 
-    // aggr's server only answers for markets it records, the rest of a coin's markets start from live trades
-    func load(timeframe: Int, markets: [String]) async {
+    // aggr's server only answers for markets it records, the rest of a coin's markets start from live trades.
+    // until is the end of the history asked for: now for the chart, a moment in the past for a note's picture
+    func load(timeframe: Int, markets: [String], until to: Date = .now) async {
         let token = UUID()
         self.token = token
         self.timeframe = timeframe
+        self.markets = markets
+        exhausted = false
+        loadingOlder = false
         loading = true
         error = nil
         notice = nil
@@ -92,36 +104,16 @@ final class IndicatorModel {
         latest = 0
         base = Carry()
 
-        let to = Date()
         do {
-            let history = try await fetchHistory(markets: markets, timeframe: timeframe, from: to.addingTimeInterval(-Double(timeframe * historyBars)), to: to)
+            // from a bar's start, so the oldest bar is whole and an older page can end right where it begins
+            let from = barStart(Int(to.timeIntervalSince1970), timeframe: timeframe) - timeframe * historyBars
+            let history = try await fetchHistory(markets: markets, timeframe: timeframe, from: Date(timeIntervalSince1970: Double(from)), to: to)
             guard token == self.token else { return }
             if history.isEmpty {
                 notice = "aggr keeps no history for this coin, the chart builds up from live trades"
             }
 
-            for bar in history {
-                update(bar.time, bar.market) { source in
-                    source.high = source.open == nil ? bar.high : max(source.high, bar.high)
-                    source.low = source.open == nil ? bar.low : min(source.low, bar.low)
-                    if source.open == nil { source.open = bar.open }
-                    source.close = bar.close
-                    source.vbuy += bar.vbuy
-                    source.vsell += bar.vsell
-                    source.lbuy += bar.lbuy
-                    source.lsell += bar.lsell
-                }
-            }
-
-            var carry = Carry()
-            let times = buckets.keys.sorted()
-            for time in times.dropLast() {
-                let bar = compute(time, buckets[time]!, carry)
-                closed.append(bar.point)
-                carry = bar.next
-            }
-            base = carry
-            latest = times.last ?? 0
+            merge(history)
             let cutoff = to.timeIntervalSince1970 * 1000
             loading = false
             ready = true
@@ -130,24 +122,87 @@ final class IndicatorModel {
             buffered = []
         } catch {
             guard token == self.token else { return }
-            self.error = "history failed: \(error.localizedDescription)"
             loading = false
+            // a load cut off by a timeframe or tab switch isn't a failure: back to not loaded, to be asked again
+            if Task.isCancelled {
+                self.timeframe = nil
+                buffered = []
+                return
+            }
+            self.error = "history failed: \(error.localizedDescription)"
             ready = true
         }
+    }
+
+    // the page of history before the oldest bar, the chart asks when it's scrolled that far back.
+    // returns how many bars it put in front, so the chart can stay where it is
+    func loadOlder() async -> Int {
+        guard !loading, !loadingOlder, !exhausted, let timeframe, let oldest = buckets.keys.min() else { return 0 }
+        let token = token
+        loadingOlder = true
+        defer { if token == self.token { loadingOlder = false } }
+        do {
+            let from = Date(timeIntervalSince1970: Double(oldest - timeframe * historyBars))
+            let history = try await fetchHistory(markets: markets, timeframe: timeframe, from: from, to: Date(timeIntervalSince1970: Double(oldest)))
+                .filter { $0.time < oldest }
+            guard token == self.token else { return 0 }
+            if history.isEmpty {
+                exhausted = true
+                return 0
+            }
+            notice = nil
+            let before = closed.count
+            merge(history)
+            return closed.count - before
+        } catch {
+            guard token == self.token else { return 0 }
+            // shown over the chart. the chart asks again when its next bar starts
+            notice = "older history failed: \(error.localizedDescription)"
+            return 0
+        }
+    }
+
+    // puts history bars into their buckets and computes every bar before the newest again,
+    // the cvd and each bar's open carry over from the bar before
+    private func merge(_ history: [HistoryBar]) {
+        for bar in history {
+            update(bar.time, bar.market) { source in
+                if let price = bar.price {
+                    source.high = source.open == nil ? price.high : max(source.high, price.high)
+                    source.low = source.open == nil ? price.low : min(source.low, price.low)
+                    if source.open == nil { source.open = price.open }
+                    source.close = price.close
+                }
+                source.vbuy += bar.vbuy
+                source.vsell += bar.vsell
+                source.lbuy += bar.lbuy
+                source.lsell += bar.lsell
+            }
+        }
+        closed = []
+        var carry = Carry()
+        let times = buckets.keys.sorted()
+        for time in times.dropLast() {
+            let bar = compute(time, buckets[time]!, carry)
+            closed.append(bar.point)
+            carry = bar.next
+        }
+        base = carry
+        latest = times.last ?? 0
     }
 
     func add(_ trades: [Trade]) {
         if decimals == nil, let first = trades.first(where: { !$0.liquidation }) {
             decimals = Counterparty.decimals(forPrice: first.price)
         }
-        // before the first load there's no timeframe, the load's buffer takes these
+        // trades that land while history loads are replayed on top of it. before any load they're
+        // dropped, the history that comes later already has them
         guard !loading, let timeframe else {
-            buffered += trades
+            if loading { buffered += trades }
             return
         }
         for trade in trades {
-            var time = Int(trade.timestamp / 1000)
-            time -= time % timeframe
+            var time = barStart(Int(trade.timestamp / 1000), timeframe: timeframe)
             // a late trade from a slower exchange goes into the current bar
             time = max(time, latest)
             if time > latest {
@@ -234,6 +289,14 @@ func decimals(forPrice price: Double) -> Int {
     min(12, max(0, 5 - Int(floor(log10(price)))))
 }
 
+// 5s, 15m, 4h, 1D, 1W
+func timeframeLabel(_ seconds: Int) -> String {
+    if seconds < 60 { return "\(seconds)s" }
+    if seconds < 3600 { return "\(seconds / 60)m" }
+    if seconds < 86400 { return "\(seconds / 3600)h" }
+    return seconds < 604800 ? "\(seconds / 86400)D" : "\(seconds / 604800)W"
+}
+
 // fixed english formatting, a locale with comma decimals would make 81.230 read like a decimal
 func price(_ value: Double, decimals: Int) -> String {
     String(format: "%.\(decimals)f", value)
@@ -242,6 +305,7 @@ func price(_ value: Double, decimals: Int) -> String {
 func usd(_ value: Double) -> String {
     let size = abs(value)
     let sign = value < 0 ? "-" : ""
+    if size >= 1e9 { return sign + String(format: "%.1fB", size / 1e9) }
     if size >= 1e6 { return sign + String(format: "%.1fM", size / 1e6) }
     if size >= 1e3 { return sign + String(format: "%.0fK", size / 1e3) }
     return sign + String(format: "%.0f", size)

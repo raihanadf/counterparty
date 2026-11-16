@@ -14,13 +14,9 @@ struct Note: Codable, Identifiable {
     let decimals: Int
     var text: String
     let created: Date
-    // the bars around it when it was taken. history only reaches back 400 bars, so the note keeps
-    // its own piece of the chart for the share card
-    let bars: [Point]
-}
-
-func timeframeLabel(_ seconds: Int) -> String {
-    seconds < 60 ? "\(seconds)s" : "\(seconds / 60)m"
+    // the bars around it, for the share picture. taken with the note and read again each time it's shared,
+    // so the picture shows what happened after. kept in the note for when aggr's history has moved on
+    var bars: [Point]
 }
 
 // every note taken, and who takes them. notes live in application support as one json file,

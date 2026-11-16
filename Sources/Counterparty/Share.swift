@@ -224,9 +224,12 @@ private struct NoteChart: View {
 
 // the share sheet: the picture as it will go out, how it's laid out, the theme it's drawn in, and where it goes
 struct ShareView: View {
-    let note: Note
+    // the coin's markets, to read the note's bars again
+    let markets: [String]
     let journal: Journal
     let themes: ThemeStore
+
+    @State private var note: Note
 
     @State private var choice: String
     @State private var status: String?
@@ -234,8 +237,9 @@ struct ShareView: View {
     @AppStorage("shareChart") private var chart = true
     @Environment(\.dismiss) private var dismiss
 
-    init(note: Note, journal: Journal, themes: ThemeStore) {
-        self.note = note
+    init(note: Note, markets: [String], journal: Journal, themes: ThemeStore) {
+        _note = State(initialValue: note)
+        self.markets = markets
         self.journal = journal
         self.themes = themes
         // starts in the theme the app is in
@@ -299,6 +303,22 @@ struct ShareView: View {
         .background(theme.colors.panel.color)
         .tint(theme.colors.accent.color)
         .preferredColorScheme(theme.appearance == .light ? .light : .dark)
+        .task { await refresh() }
+    }
+
+    // reads the bars around the note again, up to 60 after it, so the picture shows how it played out
+    // instead of stopping where the chart stood when the note was written
+    private func refresh() async {
+        let after = Date(timeIntervalSince1970: Double(note.time + 61 * note.timeframe))
+        let model = IndicatorModel()
+        await model.load(timeframe: note.timeframe, markets: markets, until: min(.now, after))
+        let points = model.points
+        guard model.error == nil, let index = points.firstIndex(where: { $0.time == note.time }) else {
+            status = "Couldn't read the chart again, this is how it stood when the note was taken. \(model.error ?? "aggr has no bars for it any more.")"
+            return
+        }
+        note.bars = Array(points[max(0, index - 60)...min(points.count - 1, index + 60)])
+        journal.save(note)
     }
 
     // a theme to draw the picture in: its background, candle and accent as three dots, then its name

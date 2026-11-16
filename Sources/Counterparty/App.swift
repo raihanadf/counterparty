@@ -40,10 +40,10 @@ enum Keys {
     static let showIndicator = "showIndicator"
     static let showDom = "showDom"
     static let showJournal = "showJournal"
+    static let showVwap = "showVwap"
+    static let showRsi = "showRsi"
     static let timeframe = "timeframe"
 }
-
-private let timeframes = [(5, "5s"), (15, "15s"), (60, "1m"), (300, "5m"), (900, "15m")]
 
 // menus mirror the header, so everything stays reachable when a theme hides it
 struct AppCommands: Commands {
@@ -54,6 +54,8 @@ struct AppCommands: Commands {
     @AppStorage(Keys.showIndicator) private var showIndicator = true
     @AppStorage(Keys.showDom) private var showDom = true
     @AppStorage(Keys.showJournal) private var showJournal = false
+    @AppStorage(Keys.showVwap) private var showVwap = false
+    @AppStorage(Keys.showRsi) private var showRsi = false
     @AppStorage(Keys.timeframe) private var timeframe = 60
 
     var body: some Commands {
@@ -82,8 +84,10 @@ struct AppCommands: Commands {
             Toggle("Indicator", isOn: $showIndicator).keyboardShortcut("i", modifiers: [.command, .option])
             Toggle("DOM", isOn: $showDom).keyboardShortcut("d", modifiers: [.command, .option])
             Toggle("Journal", isOn: $showJournal).keyboardShortcut("j", modifiers: [.command, .option])
+            Toggle("VWAP", isOn: $showVwap)
+            Toggle("RSI", isOn: $showRsi)
             Picker("Timeframe", selection: $timeframe) {
-                ForEach(timeframes, id: \.0) { Text($0.1).tag($0.0) }
+                ForEach(timeframes, id: \.self) { Text(timeframeLabel($0)).tag($0) }
             }
             Toggle("Explain Numbers", isOn: Binding(get: { help.on }, set: { help.on = $0 })).keyboardShortcut("/")
             Picker("Theme", selection: Binding(get: { themes.choice }, set: { themes.choose($0) })) {
@@ -175,7 +179,7 @@ struct ContentView: View {
             UpdatePrompt(updater: updater, release: release, theme: theme)
         }
         .sheet(item: Binding(get: { journal.sharing }, set: { journal.sharing = $0 })) { note in
-            ShareView(note: note, journal: journal, themes: themes)
+            ShareView(note: note, markets: workspace.catalogs!.markets(for: note.coin), journal: journal, themes: themes)
         }
     }
 
@@ -183,7 +187,7 @@ struct ContentView: View {
         GeometryReader { geometry in
             HStack(spacing: 0) {
                 if showIndicator {
-                    IndicatorView(coin: session.coin, model: session.indicator, journal: journal, timeframe: timeframe, theme: theme)
+                    IndicatorView(session: session, journal: journal, timeframe: timeframe, theme: theme)
                 }
                 if showIndicator && showDom {
                     theme.colors.border.color.frame(width: 1)
@@ -280,14 +284,14 @@ struct HeaderBar: View {
             Spacer(minLength: 12)
             Toggle("Indicator", isOn: $showIndicator).toggleStyle(LampToggleStyle(theme: theme)).fixedSize()
                 .explain(Hint("Shows or hides the chart (⌥⌘I).", example: "Turn it off to give the whole window to the order book while you watch a level get tested."))
-            RuleSegments(items: timeframes.map(\.0), selection: $timeframe, theme: theme) { seconds, _ in
-                Text(timeframes.first { $0.0 == seconds }!.1).font(theme.mono(-1))
+            RuleSegments(items: timeframes, selection: $timeframe, theme: theme) { seconds, _ in
+                Text(timeframeLabel(seconds)).font(theme.mono(-1))
             }
             .fixedSize()
             .disabled(!showIndicator)
             .explain(Hint(
                 "How much time one candle covers. History comes from aggr's server, so every timeframe has the same data aggr.trade shows.",
-                example: "5m or 15m to see the trend and the levels that matter. 5s or 15s to watch how price acts right at one of those levels. Trading off 5s alone means reacting to noise."
+                example: "1D or 1W for where price sits in the bigger picture, 1h or 4h for the day's trend, 5m or 15m for the levels that matter. 5s or 15s to watch how price acts right at one of those levels. Trading off 5s alone means reacting to noise."
             ))
             theme.colors.border.color.frame(width: 1, height: 14)
             Toggle("DOM", isOn: $showDom).toggleStyle(LampToggleStyle(theme: theme)).fixedSize()
@@ -303,7 +307,7 @@ struct LivePrice: View {
     let session: CoinSession
 
     var body: some View {
-        if let value = session.price, let decimals = session.indicator.decimals {
+        if let value = session.price, let decimals = session.decimals {
             Text(price(value, decimals: decimals))
         } else {
             Text("—")

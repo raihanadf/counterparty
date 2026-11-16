@@ -61,7 +61,17 @@ final class CoinSession: Identifiable {
     let id = UUID()
     let coin: String
     let markets: [String]
-    let indicator = IndicatorModel()
+    // one chart per timeframe. each loads its history once and then takes every live trade,
+    // so going back to a timeframe shows it at once instead of loading it again
+    @ObservationIgnored private let charts = Dictionary(uniqueKeysWithValues: timeframes.map { ($0, IndicatorModel()) })
+    // the timeframe on screen, what the tab's colour compares the price against
+    @ObservationIgnored var timeframe: Int?
+    // decimals the coin's prices are shown with, known from the first trade
+    private(set) var decimals: Int?
+    // where the coin's anchored vwap starts, unix seconds, nil when there's none. kept across relaunches
+    var anchor: Int? {
+        didSet { UserDefaults.standard.set(anchor, forKey: "vwapAnchor.\(coin)") }
+    }
     let book: BookModel
     // the tape: the newest trades of each market, newest last. kept per market so a quiet venue's
     // tape isn't pushed out by binance and bybit
@@ -86,6 +96,7 @@ final class CoinSession: Identifiable {
         self.coin = coin
         markets = catalogs.markets(for: coin)
         book = BookModel(catalogs: catalogs)
+        anchor = UserDefaults.standard.object(forKey: "vwapAnchor.\(coin)") as? Int
         let inbox = inbox
         feed = startFeed(
             markets: markets,
@@ -119,10 +130,15 @@ final class CoinSession: Identifiable {
         book.stop()
     }
 
-    // only when the bars aren't in this timeframe yet, so switching tabs doesn't reload
+    func chart(_ timeframe: Int) -> IndicatorModel {
+        charts[timeframe]!
+    }
+
+    // only when that timeframe's bars aren't in yet, or its last load failed
     func loadHistory(timeframe: Int) async {
-        guard indicator.timeframe != timeframe else { return }
-        await indicator.load(timeframe: timeframe, markets: markets)
+        let chart = chart(timeframe)
+        guard chart.timeframe == nil || chart.error != nil else { return }
+        await chart.load(timeframe: timeframe, markets: markets)
     }
 
     private func receive(_ trades: [Trade]) {
@@ -132,7 +148,8 @@ final class CoinSession: Identifiable {
             lastPrice = trade.price
             byMarket[trade.market, default: []].append(trade)
         }
-        indicator.add(trades)
+        if decimals == nil, let price = lastPrice { decimals = Counterparty.decimals(forPrice: price) }
+        for chart in charts.values { chart.add(trades) }
         for (market, new) in byMarket {
             var tape = tapes[market, default: []] + new
             if tape.count > 60 { tape.removeFirst(tape.count - 60) }
@@ -144,7 +161,8 @@ final class CoinSession: Identifiable {
     private func publish() {
         if price != lastPrice { price = lastPrice }
         if tradeCounts != counts { tradeCounts = counts }
-        let direction = indicator.previousClose.flatMap { close in lastPrice.map { $0 >= close } }
+        let close = timeframe.flatMap { chart($0).previousClose }
+        let direction = close.flatMap { close in lastPrice.map { $0 >= close } }
         if rising != direction { rising = direction }
     }
 }
@@ -184,13 +202,17 @@ final class Workspace {
         selected = tabs.first { $0.coin == selectedCoin } ?? tabs.first
     }
 
-    // every tab's history in the current timeframe, the shown one first, so switching tabs never waits on
-    // aggr's history server (which can take 30s+ per request). one at a time to go easy on it
+    // every tab's history in every timeframe, loaded in the background so switching timeframe or tab
+    // never waits on aggr's history server (which can take 30s+ per request). the timeframe on screen
+    // goes first and the shown tab before the others, one request at a time to go easy on the server
     func prefetch(timeframe: Int) async {
+        for session in tabs { session.timeframe = timeframe }
         let order = (selected.map { [$0] } ?? []) + tabs.filter { $0 !== selected }
-        for session in order {
-            if Task.isCancelled { return }
-            await session.loadHistory(timeframe: timeframe)
+        for frame in [timeframe] + timeframes.filter({ $0 != timeframe }) {
+            for session in order {
+                if Task.isCancelled { return }
+                await session.loadHistory(timeframe: frame)
+            }
         }
     }
 

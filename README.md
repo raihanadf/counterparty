@@ -16,7 +16,8 @@ live order flow for crypto perps, the same data as [aggr.trade](https://aggr.tra
 
 ## features
 
-- aggr's chart, averaged across every perp
+- aggr's chart, averaged across every perp, 5s to 1W, back to dec 2020
+- vwap, anchored vwap and rsi
 - real order book per exchange, with its tape
 - any coin, ⌘P to search
 - tabs that keep streaming in the background
