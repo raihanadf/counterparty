@@ -131,6 +131,8 @@ struct IndicatorView: View {
     private var painter: ChartPainter { ChartPainter(theme: theme, decimals: model.decimals, timeframe: timeframe) }
     private var axisWidth: Double { painter.axisWidth }
     private var axisHeight: Double { painter.axisHeight }
+    // history for this timeframe isn't in: still loading, or it failed. nothing is drawn until it is
+    private var waiting: Bool { model.loading || model.timeframe != timeframe || model.error != nil }
 
     var body: some View {
         GeometryReader { geometry in
@@ -176,10 +178,12 @@ struct IndicatorView: View {
                 .onChange(of: geometry.size, initial: true) { size = geometry.size }
             }
         }
+        .opacity(waiting ? 0 : 1)
+        .allowsHitTesting(!waiting)
         .overlay {
             if let error = model.error {
                 Text(error).foregroundStyle(theme.colors.text.color).padding(8).background(theme.colors.sell.color.opacity(0.2), in: .rect(cornerRadius: 4))
-            } else if model.loading {
+            } else if waiting {
                 ProgressView().controlSize(.small)
             } else if missed {
                 Text("that note is older than the bars loaded here, its share card still has its chart")

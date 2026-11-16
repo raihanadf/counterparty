@@ -86,6 +86,11 @@ final class IndicatorModel {
         error = nil
         notice = nil
         buffered = []
+        // the old timeframe's bars go now, so they can't be read as the new one's while it loads or after it fails
+        buckets = [:]
+        closed = []
+        latest = 0
+        base = Carry()
 
         let to = Date()
         do {
@@ -95,7 +100,6 @@ final class IndicatorModel {
                 notice = "aggr keeps no history for this coin, the chart builds up from live trades"
             }
 
-            buckets = [:]
             for bar in history {
                 update(bar.time, bar.market) { source in
                     source.high = source.open == nil ? bar.high : max(source.high, bar.high)
@@ -109,7 +113,6 @@ final class IndicatorModel {
                 }
             }
 
-            closed = []
             var carry = Carry()
             let times = buckets.keys.sorted()
             for time in times.dropLast() {
