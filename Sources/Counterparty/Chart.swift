@@ -7,7 +7,7 @@ import SwiftUI
 // dragging the time axis zooms, double click or a two-finger double tap resets the view.
 
 // how far the chart is zoomed and scrolled
-private struct Viewport {
+struct Viewport {
     var spacing = 7.0
     // bars scrolled back from the newest one, fractional while panning, negative looks into empty space on the right
     var offset = 0.0
@@ -23,7 +23,7 @@ private struct Viewport {
 }
 
 // the geometry of one frame, shared by drawing and gestures so they always agree
-private struct ChartFrame {
+struct ChartFrame {
     // empty bars kept right of the newest one
     static let padding = 3.0
 
@@ -104,49 +104,76 @@ private struct DragState {
     let count: Int
 }
 
+// a note of this coin and where it sits on screen
+private typealias Mark = (note: Note, at: CGPoint)
+
 struct IndicatorView: View {
+    let coin: String
     let model: IndicatorModel
+    let journal: Journal
     let timeframe: Int
     let theme: Theme
 
     @State private var viewport = Viewport()
     @State private var drag: DragState?
     @State private var hover: CGPoint?
+    // the note being written or edited, saved on return
+    @State private var draft: Note?
+    // the note whose card a click on its mark pinned open
+    @State private var opened: UUID?
+    // the journal asked for a note older than the bars loaded here
+    @State private var missed = false
+    @State private var size = CGSize.zero
+    @FocusState private var writing: Bool
+    @AppStorage(Keys.showJournal) private var showJournal = false
     @Environment(HelpMode.self) private var help
 
-    // hidden axes give their space back to the chart. labels are 7 characters for prices of 1 and up
-    // (80000.0, 99.7680), and "0." plus the decimals below that, so the axis grows for small coins
-    private var axisWidth: Double {
-        guard theme.show.priceAxis else { return 0 }
-        let characters = max(7, (model.decimals ?? 0) + 2)
-        return max(70, Double(characters) * (theme.font.size - 2) * 0.62 + 16)
-    }
-    private var axisHeight: Double { theme.show.timeAxis ? 20 : 0 }
+    private var painter: ChartPainter { ChartPainter(theme: theme, decimals: model.decimals, timeframe: timeframe) }
+    private var axisWidth: Double { painter.axisWidth }
+    private var axisHeight: Double { painter.axisHeight }
 
     var body: some View {
         GeometryReader { geometry in
             TimelineView(.periodic(from: .now, by: 0.1)) { _ in
                 let points = model.points
                 let frame = frame(points, geometry.size)
+                let marks = marks(points, frame)
+                // the note in front: the one being written, the one pinned open, or the one under the pointer
+                let front = marks.first(where: { $0.note.id == draft?.id })
+                    ?? marks.first(where: { $0.note.id == opened })
+                    ?? (drag == nil ? hover.flatMap { hit($0, marks) } : nil)
                 Canvas { context, _ in
-                    draw(points, frame, in: &context)
+                    painter.draw(points, frame, crosshair: drag == nil ? hover : nil, level: front?.note.price, in: &context)
                 }
                 .explain { point, _ in explanation(at: point, frame) }
                 .overlay(alignment: .topLeading) {
                     if theme.show.legend { legend(points, frame) }
                 }
+                // every note of the coin is a small avatar on the bar and price it was taken at
+                .overlay {
+                    ForEach(marks, id: \.note.id) { mark in
+                        Avatar(journal: journal, theme: theme, size: 16)
+                            .overlay(Circle().strokeBorder(theme.colors.accent.color))
+                            .position(mark.at)
+                    }
+                    .allowsHitTesting(false)
+                }
                 .overlay {
                     // the (?) mode reads the areas under it, gestures wait until it's off
                     if !help.on {
-                        ChartInputView(axisX: frame.width, axisY: frame.height) { input in
+                        ChartInputView(axisX: frame.width, axisY: frame.height, menu: { menu(at: $0, points: points, size: geometry.size) }) { input in
                             handle(input, points: points, size: geometry.size)
                         }
                     }
                 }
-                // after the input view so the buttons get their clicks
+                // after the input view so the buttons and the note's card get their clicks
                 .overlay(alignment: .bottomTrailing) {
                     buttons(frame).padding(.trailing, axisWidth + 6).padding(.bottom, axisHeight + 6)
                 }
+                .overlay(alignment: .topLeading) {
+                    if let front { float(card(front.note), at: front.at, in: frame) }
+                }
+                .onChange(of: geometry.size, initial: true) { size = geometry.size }
             }
         }
         .overlay {
@@ -154,6 +181,12 @@ struct IndicatorView: View {
                 Text(error).foregroundStyle(theme.colors.text.color).padding(8).background(theme.colors.sell.color.opacity(0.2), in: .rect(cornerRadius: 4))
             } else if model.loading {
                 ProgressView().controlSize(.small)
+            } else if missed {
+                Text("that note is older than the bars loaded here, its share card still has its chart")
+                    .font(theme.mono(-1)).foregroundStyle(theme.colors.muted.color)
+                    .frame(maxHeight: .infinity, alignment: .top)
+                    .padding(.top, 70)
+                    .allowsHitTesting(false)
             } else if let notice = model.notice {
                 Text(notice).font(theme.mono(-1)).foregroundStyle(theme.colors.muted.color)
                     .frame(maxHeight: .infinity, alignment: .top)
@@ -163,6 +196,8 @@ struct IndicatorView: View {
         }
         // the crosshair stays where the gestures left it otherwise
         .onChange(of: help.on) { hover = nil }
+        // again once the bars are in, a note picked in the journal can switch coin and timeframe first
+        .task(id: [journal.focus?.uuidString, String(model.loading)]) { await showFocused() }
     }
 
     private func frame(_ points: [Point], _ size: CGSize) -> ChartFrame {
@@ -178,6 +213,11 @@ struct IndicatorView: View {
             hover = location
 
         case .press(let location, let clicks):
+            // a click anywhere finishes the note being written, a click on a note's mark pins its card open
+            let mark = hit(location, marks(points, frame))
+            commit()
+            opened = mark?.note.id
+            if mark != nil { return }
             let onPriceAxis = theme.show.priceAxis && location.x > frame.width
             let onTimeAxis = theme.show.timeAxis && location.y > frame.height
             if clicks == 2 {
@@ -327,7 +367,7 @@ struct IndicatorView: View {
                 let upperWick = candle.high - max(candle.open, candle.close)
                 let lowerWick = min(candle.open, candle.close) - candle.low
                 let body = abs(candle.close - candle.open)
-                Text("\(timeLabel(point.time))  O \(format(candle.open))  H \(format(candle.high))  L \(format(candle.low))  C \(format(candle.close))")
+                Text("\(barTime(point.time, timeframe: timeframe))  O \(format(candle.open))  H \(format(candle.high))  L \(format(candle.low))  C \(format(candle.close))")
                     .foregroundStyle((candle.close >= candle.open ? theme.colors.candleUp : theme.colors.candleDownBorder).color)
                     .explain(Hint(
                         "The hovered bar, or the newest one: its start time, then Open, High, Low and Close. Each is the average of every perp of the coin, the way aggr builds its chart, so it won't match one exchange to the cent. This bar moved \(format(candle.close - candle.open)), with an upper wick of \(format(upperWick)) and a lower wick of \(format(lowerWick)).",
@@ -387,17 +427,166 @@ struct IndicatorView: View {
         .overlay(RoundedRectangle(cornerRadius: 2).strokeBorder(theme.colors.border.color))
     }
 
-    private func timeLabel(_ time: Int) -> String {
-        let date = Date(timeIntervalSince1970: Double(time))
-        let style = timeframe < 60
-            ? Date.VerbatimFormatStyle(format: "\(day: .twoDigits) \(month: .abbreviated) \(hour: .twoDigits(clock: .twentyFourHour, hourCycle: .zeroBased)):\(minute: .twoDigits):\(second: .twoDigits)", locale: Locale(identifier: "en_US"), timeZone: .current, calendar: .current)
-            : Date.VerbatimFormatStyle(format: "\(day: .twoDigits) \(month: .abbreviated) \(hour: .twoDigits(clock: .twentyFourHour, hourCycle: .zeroBased)):\(minute: .twoDigits)", locale: Locale(identifier: "en_US"), timeZone: .current, calendar: .current)
-        return date.formatted(style)
+    // MARK: notes
+
+    // where each of this coin's notes sits, the one being written too. a note taken on another
+    // timeframe lands on the bar that holds its time
+    private func marks(_ points: [Point], _ frame: ChartFrame) -> [Mark] {
+        guard let range = frame.range else { return [] }
+        let notes = journal.notes.filter { $0.coin == coin && $0.id != draft?.id } + (draft.map { [$0] } ?? [])
+        return notes.compactMap { note in
+            let bar = note.time - note.time % timeframe
+            guard let index = points[frame.visible].firstIndex(where: { $0.time >= bar }), points[index].time == bar else { return nil }
+            let at = CGPoint(x: frame.x(index), y: frame.y(note.price, in: range))
+            return at.x < frame.width && at.y > 0 && at.y < frame.height ? (note, at) : nil
+        }
     }
 
-    // MARK: drawing
+    private func hit(_ location: CGPoint, _ marks: [Mark]) -> Mark? {
+        marks.first { hypot($0.at.x - location.x, $0.at.y - location.y) < 10 }
+    }
 
-    private func draw(_ points: [Point], _ frame: ChartFrame, in context: inout GraphicsContext) {
+    // right click: a new note on the bar and price under the pointer, or what to do with the note there
+    private func menu(at location: CGPoint, points: [Point], size: CGSize) -> NSMenu? {
+        let frame = frame(points, size)
+        let menu = NSMenu()
+        if let note = hit(location, marks(points, frame))?.note {
+            menu.addItem(ActionItem("Share Note…") { journal.sharing = note })
+            menu.addItem(ActionItem("Edit Note") {
+                opened = nil
+                draft = note
+            })
+            menu.addItem(ActionItem("Delete Note") { journal.delete(note.id) })
+        } else if location.x < frame.width, location.y < frame.height, let range = frame.range, let index = frame.index(at: location.x), let decimals = model.decimals {
+            let value = frame.price(at: location.y, in: range)
+            menu.addItem(ActionItem("Add Note at \(price(value, decimals: decimals))") {
+                commit()
+                opened = nil
+                // the bars around it go in the note, so its share card can draw the chart long after they're gone
+                let around = Array(points[max(0, index - 60)..<min(points.count, index + 21)])
+                draft = Note(id: UUID(), coin: coin, timeframe: timeframe, time: points[index].time, price: value, decimals: decimals, text: "", created: .now, bars: around)
+            })
+        } else {
+            return nil
+        }
+        menu.addItem(.separator())
+        menu.addItem(ActionItem(showJournal ? "Hide Journal" : "Show Journal") { showJournal.toggle() })
+        return menu
+    }
+
+    // saves the note being written, an empty one is dropped
+    private func commit() {
+        guard let draft else { return }
+        if !draft.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { journal.save(draft) }
+        self.draft = nil
+    }
+
+    // the journal picked a note: its bar scrolls to the middle and its card opens
+    private func showFocused() async {
+        guard let id = journal.focus, !model.loading, model.timeframe == timeframe,
+              let note = journal.notes.first(where: { $0.id == id }), note.coin == coin else { return }
+        journal.focus = nil
+        let points = model.points
+        guard let index = points.firstIndex(where: { $0.time == note.time - note.time % timeframe }) else {
+            missed = true
+            try? await Task.sleep(for: .seconds(4))
+            missed = false
+            return
+        }
+        let frame = frame(points, size)
+        let centered = Double(points.count - 1 - index) + ChartFrame.padding + 0.5 - frame.width / (2 * viewport.spacing)
+        viewport.offset = clamp(offset: max(0, centered), frame)
+        viewport.anchor = points.count
+        viewport.autoScale = true
+        viewport.range = nil
+        opened = id
+    }
+
+    // the note's card: read only under the pointer, with its actions once pinned, a text field while it's written
+    private func card(_ note: Note) -> some View {
+        let writingIt = note.id == draft?.id
+        return NoteCard(note: note, journal: journal, theme: theme) {
+            if writingIt {
+                TextField("What do you see here?", text: Binding(get: { note.text }, set: { draft?.text = $0 }), axis: .vertical)
+                    .textFieldStyle(.plain)
+                    .lineLimit(1...8)
+                    .focused($writing)
+                    .onSubmit { commit() }
+                    .onExitCommand { draft = nil }
+                    .onAppear { writing = true }
+                Text("⏎ save   ⌥⏎ new line   esc cancel").font(theme.mono(-3)).foregroundStyle(theme.colors.muted.color)
+            } else {
+                Text(note.text).fixedSize(horizontal: false, vertical: true)
+                if note.id == opened {
+                    HStack(spacing: 14) {
+                        Button("Share") { journal.sharing = note }
+                        Button("Edit") {
+                            opened = nil
+                            draft = note
+                        }
+                        Button("Delete") { journal.delete(note.id) }
+                    }
+                    .buttonStyle(.plain)
+                    .textCase(.uppercase)
+                    .font(theme.caps())
+                    .tracking(1.2)
+                    .foregroundStyle(theme.colors.accent.color)
+                    .padding(.top, 2)
+                }
+            }
+        }
+        .padding(12)
+        .background(theme.colors.panel.color, in: .rect(cornerRadius: 4))
+        .overlay(RoundedRectangle(cornerRadius: 4).strokeBorder(theme.colors.accent.color.opacity(0.45)))
+        .shadow(color: .black.opacity(0.45), radius: 12, y: 4)
+        .allowsHitTesting(writingIt || note.id == opened)
+    }
+
+    // puts a card beside a point of the chart: right of it or left when there's no room, below it in the top half and above it in the bottom half
+    private func float(_ card: some View, at anchor: CGPoint, in frame: ChartFrame) -> some View {
+        let width = min(300, frame.width - 16)
+        let right = anchor.x + 14 + width <= frame.width - 8
+        let x = right ? anchor.x + 14 : max(8, anchor.x - 14 - width)
+        let sized = card.frame(width: width, alignment: .leading)
+        return Group {
+            if anchor.y < frame.height / 2 {
+                sized.offset(x: x, y: anchor.y + 14)
+            } else {
+                sized.frame(height: max(0, anchor.y - 14), alignment: .bottom).offset(x: x)
+            }
+        }
+    }
+}
+
+// a bar's start on your clock, with seconds below the minute timeframes
+func barTime(_ time: Int, timeframe: Int) -> String {
+    let date = Date(timeIntervalSince1970: Double(time))
+    let style = timeframe < 60
+        ? Date.VerbatimFormatStyle(format: "\(day: .twoDigits) \(month: .abbreviated) \(hour: .twoDigits(clock: .twentyFourHour, hourCycle: .zeroBased)):\(minute: .twoDigits):\(second: .twoDigits)", locale: Locale(identifier: "en_US"), timeZone: .current, calendar: .current)
+        : Date.VerbatimFormatStyle(format: "\(day: .twoDigits) \(month: .abbreviated) \(hour: .twoDigits(clock: .twentyFourHour, hourCycle: .zeroBased)):\(minute: .twoDigits)", locale: Locale(identifier: "en_US"), timeZone: .current, calendar: .current)
+    return date.formatted(style)
+}
+
+// MARK: drawing
+
+// draws one frame of the chart. the live chart and a note's share card both go through it, so they look the same
+struct ChartPainter {
+    let theme: Theme
+    // nil until a price was seen
+    let decimals: Int?
+    let timeframe: Int
+
+    // hidden axes give their space back to the chart. labels are 7 characters for prices of 1 and up
+    // (80000.0, 99.7680), and "0." plus the decimals below that, so the axis grows for small coins
+    var axisWidth: Double {
+        guard theme.show.priceAxis else { return 0 }
+        let characters = max(7, (decimals ?? 0) + 2)
+        return max(70, Double(characters) * (theme.font.size - 2) * 0.62 + 16)
+    }
+    var axisHeight: Double { theme.show.timeAxis ? 20 : 0 }
+
+    // hover is where the crosshair goes, level a note's price to rule across
+    func draw(_ points: [Point], _ frame: ChartFrame, crosshair hover: CGPoint?, level noted: Double?, in context: inout GraphicsContext) {
         let colors = theme.colors
         let show = theme.show
         let width = frame.width
@@ -462,7 +651,7 @@ struct IndicatorView: View {
         }
 
         // a candle means a price was seen, which is what sets the decimals
-        guard let range = frame.range, let decimals = model.decimals else { return }
+        guard let range = frame.range, let decimals else { return }
         let y = { (price: Double) in frame.y(price, in: range) }
         let format = { (value: Double) in price(value, decimals: decimals) }
 
@@ -515,8 +704,16 @@ struct IndicatorView: View {
             }
         }
 
+        // the price of the note in front, ruled across in the accent
+        if let noted, y(noted) > 0, y(noted) < height {
+            plot.stroke(line(CGPoint(x: 0, y: y(noted)), CGPoint(x: width, y: y(noted))), with: .color(colors.accent.color.opacity(0.7)), style: StrokeStyle(lineWidth: 1, dash: [4, 3]))
+            if show.priceAxis {
+                tag(format(noted), at: CGPoint(x: width + 2, y: y(noted)), fill: colors.accent.color, text: colors.background.color, in: &context)
+            }
+        }
+
         // crosshair snaps to the hovered bar, with its price and time on the axes
-        if show.crosshair, drag == nil, let hover, hover.x < width, hover.y < height, let index = frame.index(at: hover.x) {
+        if show.crosshair, let hover, hover.x < width, hover.y < height, let index = frame.index(at: hover.x) {
             let x = frame.x(index)
             let dash = StrokeStyle(lineWidth: 1, dash: [3, 3])
             plot.stroke(line(CGPoint(x: x, y: 0), CGPoint(x: x, y: height)), with: .color(colors.crosshair.color), style: dash)
@@ -525,7 +722,7 @@ struct IndicatorView: View {
                 tag(format(frame.price(at: hover.y, in: range)), at: CGPoint(x: width + 2, y: hover.y), fill: colors.panel.color, text: colors.text.color, border: colors.border.color, in: &context)
             }
             if show.timeAxis {
-                let label = Text(timeLabel(points[index].time)).font(theme.mono(-2)).foregroundStyle(colors.text.color)
+                let label = Text(barTime(points[index].time, timeframe: timeframe)).font(theme.mono(-2)).foregroundStyle(colors.text.color)
                 let size = context.resolve(label).measure(in: CGSize(width: 300, height: 30))
                 let box = CGRect(x: min(max(0, x - size.width / 2 - 6), width - size.width - 12), y: height + 2, width: size.width + 12, height: axisHeight - 4)
                 context.fill(Path(roundedRect: box, cornerRadius: 1.5), with: .color(colors.panel.color))
@@ -561,6 +758,7 @@ private struct ChartInputView: NSViewRepresentable {
     // where the price axis and the time axis start, for the cursors
     let axisX: Double
     let axisY: Double
+    let menu: (CGPoint) -> NSMenu?
     let send: (ChartInput) -> Void
 
     func makeNSView(context: Context) -> InputView {
@@ -569,12 +767,14 @@ private struct ChartInputView: NSViewRepresentable {
 
     func updateNSView(_ view: InputView, context: Context) {
         view.send = send
+        view.contextMenu = menu
         view.axisX = axisX
         view.axisY = axisY
     }
 
     final class InputView: NSView {
         var send: (ChartInput) -> Void = { _ in }
+        var contextMenu: (CGPoint) -> NSMenu? = { _ in nil }
         var axisX = 0.0
         var axisY = 0.0
         private var pressed: CGPoint?
@@ -608,6 +808,8 @@ private struct ChartInputView: NSViewRepresentable {
         }
 
         override func mouseDown(with event: NSEvent) {
+            // ctrl click is a right click
+            if event.modifierFlags.contains(.control) { return rightMouseDown(with: event) }
             let point = location(event)
             pressed = point
             if point.x <= axisX && point.y <= axisY { NSCursor.closedHand.set() }
@@ -638,5 +840,31 @@ private struct ChartInputView: NSViewRepresentable {
         override func smartMagnify(with event: NSEvent) {
             send(.reset)
         }
+
+        // right click, two-finger click and ctrl click. popped up by hand instead of through menu(for:),
+        // so it doesn't depend on swiftui's hosting view passing the event on
+        override func rightMouseDown(with event: NSEvent) {
+            guard let menu = contextMenu(location(event)) else { return }
+            NSMenu.popUpContextMenu(menu, with: event, for: self)
+        }
+    }
+}
+
+// a menu item that runs a closure, for the chart's right-click menu
+private final class ActionItem: NSMenuItem {
+    private let run: () -> Void
+
+    init(_ title: String, run: @escaping () -> Void) {
+        self.run = run
+        super.init(title: title, action: #selector(fire), keyEquivalent: "")
+        target = self
+    }
+
+    required init(coder: NSCoder) {
+        preconditionFailure("menu items here are never decoded")
+    }
+
+    @objc private func fire() {
+        run()
     }
 }

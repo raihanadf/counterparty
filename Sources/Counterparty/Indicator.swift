@@ -23,10 +23,18 @@ private struct Carry {
     var cvd = 0.0
 }
 
-struct Point {
+// codable because a note keeps the bars around it
+struct Point: Codable {
+    struct Candle: Codable {
+        let open: Double
+        let high: Double
+        let low: Double
+        let close: Double
+    }
+
     let time: Int
     // nil when no market has traded yet
-    let candle: (open: Double, high: Double, low: Double, close: Double)?
+    let candle: Candle?
     let vbuy: Double
     let vsell: Double
     let lbuy: Double
@@ -201,10 +209,10 @@ final class IndicatorModel {
             sources += 1
         }
 
-        var candle: (open: Double, high: Double, low: Double, close: Double)?
+        var candle: Point.Candle?
         if sources > 0 {
             let candleOpen = carry.close ?? open / sources
-            candle = (candleOpen, max(candleOpen, high / sources), min(candleOpen, low / sources), close / sources)
+            candle = Point.Candle(open: candleOpen, high: max(candleOpen, high / sources), low: min(candleOpen, low / sources), close: close / sources)
         }
         let next = Carry(closes: closes, close: candle?.close ?? carry.close, cvd: carry.cvd + vbuy - vsell)
         return (Point(time: time, candle: candle, vbuy: vbuy, vsell: vsell, lbuy: lbuy, lsell: lsell, cvd: next.cvd), next)

@@ -5,6 +5,7 @@ import UniformTypeIdentifiers
 struct SettingsView: View {
     let themes: ThemeStore
     let updater: Updater
+    let journal: Journal
 
     @State private var exportError: String?
 
@@ -12,6 +13,7 @@ struct SettingsView: View {
         let theme = themes.theme
         Form {
             updates(theme)
+            profile(theme)
 
             Section {
                 // a swatch of each theme's background, candles and accent, click to switch
@@ -73,7 +75,7 @@ struct SettingsView: View {
     }
 
     private func swatch(_ choice: String) -> some View {
-        let theme = choice == ThemeStore.custom ? themes.imported! : Theme.builtins.first { $0.name == choice }!
+        let theme = themes.theme(of: choice)
         let colors = theme.colors
         let selected = themes.choice == choice
         let ring = themes.theme.colors
@@ -143,6 +145,33 @@ struct SettingsView: View {
         } catch {
             exportError = "Export failed: \(error.localizedDescription)"
         }
+    }
+
+    // who the journal's notes are signed by
+    private func profile(_ theme: Theme) -> some View {
+        @Bindable var journal = journal
+        return Section {
+            HStack(spacing: 12) {
+                Avatar(journal: journal, theme: theme, size: 44)
+                TextField("Name", text: $journal.name).labelsHidden()
+                Button("Choose Photo…") { chooseAvatar() }
+                Button("Remove") { journal.removeAvatar() }.disabled(journal.avatar == nil)
+            }
+            if let error = journal.error {
+                Text(error).foregroundStyle(theme.colors.statusDown.color).textSelection(.enabled)
+            }
+        } header: {
+            CapsLabel("Journal profile", theme: theme)
+        }
+    }
+
+    private func chooseAvatar() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.image]
+        panel.allowsMultipleSelection = false
+        panel.message = "Choose your avatar"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        journal.setAvatar(from: url)
     }
 }
 

@@ -8,6 +8,7 @@ struct CounterpartyApp: App {
     @State private var themes = ThemeStore()
     @State private var help = HelpMode()
     @State private var updater = Updater()
+    @State private var journal = Journal()
 
     init() {
         // a bare executable (swift run) starts as a background process without this
@@ -16,7 +17,7 @@ struct CounterpartyApp: App {
 
     var body: some Scene {
         Window("Counterparty", id: "main") {
-            ContentView(workspace: workspace, themes: themes, updater: updater)
+            ContentView(workspace: workspace, themes: themes, updater: updater, journal: journal)
                 .environment(help)
                 .frame(minWidth: 900, minHeight: 560)
                 .task {
@@ -29,15 +30,16 @@ struct CounterpartyApp: App {
         .commands { AppCommands(workspace: workspace, themes: themes, help: help) }
 
         Settings {
-            SettingsView(themes: themes, updater: updater)
+            SettingsView(themes: themes, updater: updater, journal: journal)
         }
     }
 }
 
 // toggles and selections survive a relaunch
-private enum Keys {
+enum Keys {
     static let showIndicator = "showIndicator"
     static let showDom = "showDom"
+    static let showJournal = "showJournal"
     static let timeframe = "timeframe"
 }
 
@@ -51,6 +53,7 @@ struct AppCommands: Commands {
 
     @AppStorage(Keys.showIndicator) private var showIndicator = true
     @AppStorage(Keys.showDom) private var showDom = true
+    @AppStorage(Keys.showJournal) private var showJournal = false
     @AppStorage(Keys.timeframe) private var timeframe = 60
 
     var body: some Commands {
@@ -78,6 +81,7 @@ struct AppCommands: Commands {
         CommandGroup(before: .toolbar) {
             Toggle("Indicator", isOn: $showIndicator).keyboardShortcut("i", modifiers: [.command, .option])
             Toggle("DOM", isOn: $showDom).keyboardShortcut("d", modifiers: [.command, .option])
+            Toggle("Journal", isOn: $showJournal).keyboardShortcut("j", modifiers: [.command, .option])
             Picker("Timeframe", selection: $timeframe) {
                 ForEach(timeframes, id: \.0) { Text($0.1).tag($0.0) }
             }
@@ -94,9 +98,11 @@ struct ContentView: View {
     let workspace: Workspace
     let themes: ThemeStore
     let updater: Updater
+    let journal: Journal
 
     @AppStorage(Keys.showIndicator) private var showIndicator = true
     @AppStorage(Keys.showDom) private var showDom = true
+    @AppStorage(Keys.showJournal) private var showJournal = false
     @AppStorage(Keys.timeframe) private var timeframe = 60
     @Environment(HelpMode.self) private var help
     // the launch intro plays once, over everything, until the markets are in
@@ -168,13 +174,16 @@ struct ContentView: View {
         .sheet(item: Binding(get: { introDone ? updater.prompt : nil }, set: { if $0 == nil { updater.later() } })) { release in
             UpdatePrompt(updater: updater, release: release, theme: theme)
         }
+        .sheet(item: Binding(get: { journal.sharing }, set: { journal.sharing = $0 })) { note in
+            ShareView(note: note, journal: journal, themes: themes)
+        }
     }
 
     private func panes(_ session: CoinSession, _ theme: Theme) -> some View {
         GeometryReader { geometry in
             HStack(spacing: 0) {
                 if showIndicator {
-                    IndicatorView(model: session.indicator, timeframe: timeframe, theme: theme)
+                    IndicatorView(coin: session.coin, model: session.indicator, journal: journal, timeframe: timeframe, theme: theme)
                 }
                 if showIndicator && showDom {
                     theme.colors.border.color.frame(width: 1)
@@ -189,6 +198,10 @@ struct ContentView: View {
                         .foregroundStyle(theme.colors.muted.color)
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
+                if showJournal {
+                    theme.colors.border.color.frame(width: 1)
+                    JournalView(journal: journal, workspace: workspace, theme: theme).frame(width: 300)
+                }
             }
         }
     }
@@ -202,6 +215,7 @@ struct HeaderBar: View {
 
     @AppStorage(Keys.showIndicator) private var showIndicator = true
     @AppStorage(Keys.showDom) private var showDom = true
+    @AppStorage(Keys.showJournal) private var showJournal = false
     @AppStorage(Keys.timeframe) private var timeframe = 60
 
     // the widest layout that fits wins, so labels drop out one by one instead of wrapping letter by letter
@@ -278,6 +292,8 @@ struct HeaderBar: View {
             theme.colors.border.color.frame(width: 1, height: 14)
             Toggle("DOM", isOn: $showDom).toggleStyle(LampToggleStyle(theme: theme)).fixedSize()
                 .explain(Hint("Shows or hides the order book ladder (⌥⌘D).", example: "Turn it off when you only want the chart; the book keeps streaming in the background so it's ready when it comes back."))
+            Toggle("Journal", isOn: $showJournal).toggleStyle(LampToggleStyle(theme: theme)).fixedSize()
+                .explain(Hint("Shows or hides the journal, every note you took (⌥⌘J). Right-click the chart to take one on that bar and price.", example: "Write why you think a level holds before it's tested, then come back and read it after. A note shared as a picture carries its piece of the chart with it."))
         }
     }
 }

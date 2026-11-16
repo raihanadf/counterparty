@@ -22,6 +22,7 @@ live order flow for crypto perps, the same data as [aggr.trade](https://aggr.tra
 - tabs that keep streaming in the background
 - (?) mode explains every number
 - trackpad gestures, tradingview style
+- journal: right-click the chart to pin a note, share it as a picture in any theme
 - 9 themes, or import your own
 - works behind dns blocks
 - updates itself

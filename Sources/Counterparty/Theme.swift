@@ -323,6 +323,11 @@ final class ThemeStore {
         return "\(imported.name) (imported)"
     }
 
+    // the theme behind a choice, the imported one has to exist when it's asked for
+    func theme(of choice: String) -> Theme {
+        choice == Self.custom ? imported! : Theme.builtins.first { $0.name == choice }!
+    }
+
     init() {
         source = UserDefaults.standard.url(forKey: Self.sourceKey)
         if FileManager.default.fileExists(atPath: Self.saved.path) {
