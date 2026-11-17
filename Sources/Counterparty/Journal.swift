@@ -1,8 +1,13 @@
 import AppKit
+import CounterpartyKit
 import SwiftUI
 
 // a note pinned to a bar and a price of a coin's chart
 struct Note: Codable, Identifiable {
+    enum Side: String, Codable {
+        case long, short
+    }
+
     let id: UUID
     let coin: String
     // the timeframe it was taken on, seconds per bar
@@ -14,9 +19,53 @@ struct Note: Codable, Identifiable {
     let decimals: Int
     var text: String
     let created: Date
-    // the bars around it, for the share picture. taken with the note and read again each time it's shared,
-    // so the picture shows what happened after. kept in the note for when aggr's history has moved on
+    // the bars around it, for the share picture. read again each time it's shared, so the picture shows
+    // what happened after. kept in the note for when aggr's history has moved on
     var bars: [Point]
+    // seconds per bar of those bars, which the share picture picks to fit the time since the note.
+    // nil when they're in the note's own timeframe, as notes keep them when they're taken
+    var span: Int?
+    // the trade the note is about, nil for a plain note. notes from before it existed have none
+    var side: Side?
+
+    var barTimeframe: Int { span ?? timeframe }
+
+    // start of the bar among its bars that holds the note
+    var barTime: Int { barStart(time, timeframe: barTimeframe) }
+
+    // the newest close among its bars, from the note's bar on
+    var lastClose: Double? {
+        bars.last { $0.time >= barTime && $0.candle != nil }?.candle?.close
+    }
+
+    // how far price went from the note's price to the newest close, in percent, with the trade's sign:
+    // positive is a long that went up or a short that went down. a plain note gets the plain move
+    var result: Double? {
+        lastClose.map { ($0 - price) / price * 100 * (side == .short ? -1 : 1) }
+    }
+}
+
+// LONG +0.42% on a tinted pill, in the buy colour when the trade is up and the sell colour when it's down.
+// a plain note reads "since" with the move in the colour of its direction
+struct Outcome: View {
+    let note: Note
+    let theme: Theme
+
+    var body: some View {
+        if let result = note.result, let last = note.lastClose {
+            let color = (result >= 0 ? theme.colors.buy : theme.colors.sell).color
+            HStack(spacing: 8) {
+                Text("→ \(price(last, decimals: note.decimals))").foregroundStyle(theme.colors.muted.color)
+                Text("\(note.side?.rawValue.uppercased() ?? "SINCE") \(result >= 0 ? "+" : "")\(String(format: "%.2f", result))%")
+                    .font(theme.mono(1, weight: .bold))
+                    .foregroundStyle(color)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 3)
+                    .background(color.opacity(0.16), in: .rect(cornerRadius: 4))
+                    .overlay(RoundedRectangle(cornerRadius: 4).strokeBorder(color.opacity(0.5)))
+            }
+        }
+    }
 }
 
 // every note taken, and who takes them. notes live in application support as one json file,
@@ -166,6 +215,11 @@ struct NoteCard<Content: View>: View {
                     Text(note.coin).fontWeight(.semibold).foregroundStyle(theme.colors.accent.color)
                     Text(timeframeLabel(note.timeframe)).foregroundStyle(theme.colors.muted.color)
                     Text(price(note.price, decimals: note.decimals))
+                    if let side = note.side {
+                        Text(side.rawValue.uppercased())
+                            .fontWeight(.semibold)
+                            .foregroundStyle((side == .long ? theme.colors.buy : theme.colors.sell).color)
+                    }
                 }
                 .font(theme.mono(-2))
                 VStack(alignment: .leading, spacing: 6) {

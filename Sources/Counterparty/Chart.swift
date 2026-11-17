@@ -591,6 +591,11 @@ struct IndicatorView: View {
                     .onSubmit { commit() }
                     .onExitCommand { draft = nil }
                     .onAppear { writing = true }
+                // which trade the note is about, so its share picture can say whether it worked
+                RuleSegments(items: [nil, Note.Side.long, .short], selection: Binding(get: { note.side }, set: { draft?.side = $0 }), theme: theme) { side, _ in
+                    Text(side?.rawValue.uppercased() ?? "NOTE").font(theme.caps()).tracking(1.2)
+                }
+                .padding(.leading, -8)
                 Text("⏎ save   ⌥⏎ new line   esc cancel").font(theme.mono(-3)).foregroundStyle(theme.colors.muted.color)
             } else {
                 Text(note.text).fixedSize(horizontal: false, vertical: true)
@@ -866,7 +871,7 @@ struct ChartPainter {
 
 // MARK: appkit input
 
-private enum ChartInput {
+enum ChartInput {
     case hover(CGPoint?)
     case press(CGPoint, clicks: Int)
     case drag(CGSize)
@@ -877,7 +882,7 @@ private enum ChartInput {
 }
 
 // swiftui doesn't see scroll wheels, trackpad swipes or pinches anchored at the pointer on macos, so a plain nsview catches them
-private struct ChartInputView: NSViewRepresentable {
+struct ChartInputView: NSViewRepresentable {
     // where the price axis and the time axis start, for the cursors
     let axisX: Double
     let axisY: Double

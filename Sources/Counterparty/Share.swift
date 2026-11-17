@@ -1,4 +1,5 @@
 import AppKit
+import CounterpartyKit
 import SwiftUI
 
 // how the shared picture is laid out
@@ -33,12 +34,14 @@ struct ShareCard: View {
         .background(theme.colors.background.color)
     }
 
-    // where on the chart: BTC · 5m · 65290.5
+    // where on the chart and how it went: BTC · 5m · 65290.5 · LONG → 65410.0 +0.18%
     private var target: some View {
         HStack(spacing: 7) {
             Text(note.coin).fontWeight(.semibold).foregroundStyle(theme.colors.accent.color)
-            Text(timeframeLabel(note.timeframe)).foregroundStyle(theme.colors.muted.color)
+            // the bars' own timeframe, which the picture picks to fit the time since the note
+            Text(timeframeLabel(note.barTimeframe)).foregroundStyle(theme.colors.muted.color)
             Text(price(note.price, decimals: note.decimals))
+            Outcome(note: note, theme: theme)
         }
         .font(theme.mono(-1))
     }
@@ -173,11 +176,12 @@ struct ShareCard: View {
 private struct NoteLayout {
     let painter: ChartPainter
     let frame: ChartFrame
+    let range: ClosedRange<Double>
     // nil when the bar the note was taken on isn't among its bars
     let mark: CGPoint?
 
     init(note: Note, theme: Theme, size: CGSize) {
-        painter = ChartPainter(theme: theme, decimals: note.decimals, timeframe: note.timeframe)
+        painter = ChartPainter(theme: theme, decimals: note.decimals, timeframe: note.barTimeframe)
         let width = size.width - painter.axisWidth
         // prices fit the bars and the note, which can sit above or below every candle
         let candles = note.bars.compactMap(\.candle)
@@ -185,10 +189,12 @@ private struct NoteLayout {
         let high = (candles.map(\.high) + [note.price]).max()!
         let span = max(high - low, (low + high) / 2 * 0.002) * 1.16
         let range = ((low + high - span) / 2)...((low + high + span) / 2)
-        let viewport = Viewport(spacing: min(12, width / Double(note.bars.count + 3)), autoScale: false, range: range)
+        // the bars fill the width, the few there are drawn big
+        let viewport = Viewport(spacing: min(40, width / Double(note.bars.count + 3)), autoScale: false, range: range)
         let frame = ChartFrame(points: note.bars, width: width, height: size.height - painter.axisHeight, viewport: viewport)
         self.frame = frame
-        mark = note.bars.firstIndex { $0.time == note.time }.map { CGPoint(x: frame.x($0), y: frame.y(note.price, in: range)) }
+        self.range = range
+        mark = note.bars.firstIndex { $0.time == note.barTime }.map { CGPoint(x: frame.x($0), y: frame.y(note.price, in: range)) }
     }
 }
 
@@ -204,6 +210,14 @@ private struct NoteChart: View {
         GeometryReader { geometry in
             let layout = NoteLayout(note: note, theme: theme, size: geometry.size)
             Canvas { context, _ in
+                // the stretch from the note to the newest close, shaded in the colour of how it went,
+                // under the candles so they read through it
+                if let mark = layout.mark, let last = note.lastClose, let result = note.result {
+                    let end = layout.frame.x(note.bars.count - 1)
+                    let lastY = layout.frame.y(last, in: layout.range)
+                    let band = CGRect(x: mark.x, y: min(mark.y, lastY), width: max(0, end - mark.x), height: abs(lastY - mark.y))
+                    context.fill(Path(band), with: .color((result >= 0 ? theme.colors.buy : theme.colors.sell).color.opacity(0.16)))
+                }
                 layout.painter.draw(note.bars, layout.frame, crosshair: nil, level: note.price, in: &context)
             }
             if let mark = layout.mark {
@@ -230,9 +244,20 @@ struct ShareView: View {
     let themes: ThemeStore
 
     @State private var note: Note
+    // the bars the picture is cut from, read again for the sheet. nil until they're in, the note's own are shown then
+    @State private var model: IndicatorModel?
+    // which of them the picture shows: its first bar and how many, fractional so small trackpad moves add up.
+    // swiping, dragging and pinching the preview change them like the chart's own, and the picture and the
+    // stored note follow
+    @State private var lower = 0.0
+    @State private var count = 0.0
+    // where a drag on the preview started
+    @State private var dragFrom: Double?
 
     @State private var choice: String
     @State private var status: String?
+    // the bars' timeframe picked in the sheet, nil picks one that fits the time since the note
+    @State private var span: Int?
     @AppStorage("shareStyle") private var style = ShareStyle.pinned
     @AppStorage("shareChart") private var chart = true
     @Environment(\.dismiss) private var dismiss
@@ -260,6 +285,23 @@ struct ShareView: View {
                 }
             }
             .frame(width: 480, height: 500)
+            // the chart's own input: two-finger swipe sideways or drag moves along the bars, swipe up and down or
+            // pinch zooms around the note, double-click fits again. a nsview, swiftui doesn't see swipes on macos
+            .overlay {
+                if chart && model != nil {
+                    ChartInputView(axisX: .infinity, axisY: .infinity, menu: { _ in nil }) { handle($0) }
+                }
+            }
+            .overlay(alignment: .bottomTrailing) {
+                if chart && model != nil {
+                    HStack(spacing: 4) {
+                        zoomButton("minus", theme) { zoom(by: 0.7) }
+                        zoomButton("plus", theme) { zoom(by: 1.4) }
+                    }
+                    .padding(6)
+                    .help("Swipe, drag or pinch the picture like the chart, double-click to fit")
+                }
+            }
             .padding(28)
             .background(theme.colors.background.color)
             theme.colors.border.color.frame(width: 1)
@@ -270,6 +312,28 @@ struct ShareView: View {
                 }
                 .padding(.leading, -8)
                 Toggle("Chart", isOn: $chart).toggleStyle(LampToggleStyle(theme: theme)).padding(.top, 8)
+                HStack {
+                    CapsLabel("Bars", theme: theme)
+                    Spacer()
+                    Picker("Bars", selection: $span) {
+                        Text("Auto").tag(Int?.none)
+                        ForEach(timeframes, id: \.self) { Text(timeframeLabel($0)).tag(Int?.some($0)) }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.menu)
+                    .fixedSize()
+                    .disabled(!chart)
+                }
+                .padding(.top, 12)
+                // the trade the note is about, set here too for notes written before there was a choice
+                CapsLabel("Trade", theme: theme).padding(.top, 16).padding(.bottom, 4)
+                RuleSegments(items: [nil, Note.Side.long, .short], selection: Binding(get: { note.side }, set: {
+                    note.side = $0
+                    journal.save(note)
+                }), theme: theme) { side, _ in
+                    Text(side.map { $0 == .long ? "Long" : "Short" } ?? "None")
+                }
+                .padding(.leading, -8)
                 CapsLabel("Theme", theme: theme).padding(.top, 16).padding(.bottom, 6)
                 ForEach(themes.choices, id: \.self) { name in
                     themeRow(name, theme)
@@ -303,22 +367,138 @@ struct ShareView: View {
         .background(theme.colors.panel.color)
         .tint(theme.colors.accent.color)
         .preferredColorScheme(theme.appearance == .light ? .light : .dark)
-        .task { await refresh() }
+        .task(id: span) { await refresh() }
     }
 
-    // reads the bars around the note again, up to 60 after it, so the picture shows how it played out
-    // instead of stopping where the chart stood when the note was written
+    // reads the chart again for the picture. unless a timeframe is picked, the bars are as long as it takes to
+    // fit the time since the note in about 30 of them, so a note from ten minutes ago gets 15s bars and one from
+    // last week gets hours. the bars end now, or 300 bars after the note when that's earlier, so even 5s bars
+    // reach an old note; moving to the left edge loads the bars before, like the chart
     private func refresh() async {
-        let after = Date(timeIntervalSince1970: Double(note.time + 61 * note.timeframe))
-        let model = IndicatorModel()
-        await model.load(timeframe: note.timeframe, markets: markets, until: min(.now, after))
-        let points = model.points
-        guard model.error == nil, let index = points.firstIndex(where: { $0.time == note.time }) else {
-            status = "Couldn't read the chart again, this is how it stood when the note was taken. \(model.error ?? "aggr has no bars for it any more.")"
+        model = nil
+        let now = Int(Date.now.timeIntervalSince1970)
+        let elapsed = max(1, now - note.time)
+        let span = span ?? timeframes.min { abs(Double(elapsed) / Double($0) - 30) < abs(Double(elapsed) / Double($1) - 30) }!
+        let loaded = IndicatorModel()
+        let end = min(now, barStart(note.time, timeframe: span) + 300 * span)
+        await loaded.load(timeframe: span, markets: markets, until: Date(timeIntervalSince1970: Double(end)))
+        if Task.isCancelled { return }
+        if let error = loaded.error {
+            status = "Couldn't read the chart again, this is how it stood. \(error)"
             return
         }
-        note.bars = Array(points[max(0, index - 60)...min(points.count - 1, index + 60)])
+        guard loaded.points.contains(where: { $0.time == barStart(note.time, timeframe: span) }) else {
+            status = "aggr has no \(timeframeLabel(span)) bars for this note, pick another timeframe."
+            return
+        }
+        status = nil
+        note.span = span
+        model = loaded
+        fit()
+        save()
+    }
+
+    private var bars: [Point] { model?.points ?? [] }
+
+    // about half as many bars before the note as after it, at most 60 after: enough to see what led there,
+    // few enough that the candles stay big and the picture is mostly what came next
+    private func fit() {
+        guard let index = bars.firstIndex(where: { $0.time == note.barTime }) else { return }
+        let after = min(60, bars.count - 1 - index)
+        let before = min(25, max(12, after / 2))
+        lower = Double(index - before)
+        count = Double(before + after + 1)
+        apply()
+    }
+
+    // fewer bars when the factor is over 1, more when it's under, with the note's bar kept where it is on screen
+    // (or the middle, when it's out of view)
+    private func zoom(by factor: Double) {
+        guard !bars.isEmpty else { return }
+        let index = bars.firstIndex(where: { $0.time == note.barTime }).map(Double.init)
+        let anchor = index.flatMap { $0 >= lower && $0 < lower + count ? $0 : nil } ?? lower + count / 2
+        let share = (anchor - lower) / count
+        count = min(Double(bars.count), max(8, count / factor))
+        lower = anchor - share * count
+        apply()
+    }
+
+    private func handle(_ input: ChartInput) {
+        // the chart is about 440 points wide in the preview
+        let perPoint = count / 440
+        switch input {
+        case .scroll(let dx, let dy, let precise, _):
+            if precise {
+                // trackpad: the bigger axis wins so a diagonal swipe doesn't do both
+                if abs(dx) > abs(dy) {
+                    lower -= dx * perPoint
+                    apply()
+                } else {
+                    zoom(by: exp(dy * 0.01))
+                }
+            } else if dx != 0 {
+                lower -= dx * 2
+                apply()
+            } else {
+                zoom(by: exp(dy * 0.1))
+            }
+        case .pinch(let magnification, _):
+            zoom(by: 1 + magnification)
+        case .press(_, let clicks):
+            if clicks == 2 { fit() }
+            dragFrom = lower
+        case .drag(let moved):
+            guard let dragFrom else { return }
+            lower = dragFrom - moved.width * perPoint
+            apply()
+        case .release:
+            dragFrom = nil
+            save()
+        case .reset:
+            fit()
+        case .hover:
+            break
+        }
+    }
+
+    // keeps the view on the bars and puts its bars in the note. near the left edge the bars before are
+    // loaded, and the view stays on the same bars once they're in front
+    private func apply() {
+        guard let model, !bars.isEmpty else { return }
+        count = min(Double(bars.count), max(8, count))
+        lower = min(max(0, lower), Double(bars.count) - count)
+        let first = Int(lower.rounded())
+        let shown = first..<min(bars.count, first + Int(count.rounded()))
+        let picked = Array(bars[shown])
+        if picked.first?.time != note.bars.first?.time || picked.count != note.bars.count { note.bars = picked }
+        if lower < 20 && !model.loadingOlder {
+            Task {
+                let added = await model.loadOlder()
+                lower += Double(added)
+                if added > 0 { apply() }
+            }
+        }
+    }
+
+    // the picture keeps the bars it was last shown with
+    private func save() {
         journal.save(note)
+    }
+
+    private func zoomButton(_ symbol: String, _ theme: Theme, _ action: @escaping () -> Void) -> some View {
+        Button {
+            action()
+            save()
+        } label: {
+            Image(systemName: symbol)
+                .font(.system(size: 10, weight: .semibold))
+                .frame(width: 22, height: 22)
+                .background(theme.colors.panel.color.opacity(0.9), in: .rect(cornerRadius: 3))
+                .overlay(RoundedRectangle(cornerRadius: 3).strokeBorder(theme.colors.border.color))
+                .contentShape(.rect)
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(theme.colors.text.color)
     }
 
     // a theme to draw the picture in: its background, candle and accent as three dots, then its name
